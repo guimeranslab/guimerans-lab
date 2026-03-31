@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Guimerans Lab</title>
+  <!-- Capa de estilos principal -->
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+  <!-- Libreria para leer Excel en el navegador -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <!-- Barra de navegacion principal -->
+  <header class="topbar">
+    <div class="brand logo-brand" aria-label="Guimerans Lab">
+      <span class="logo-strong">GUIMERANS</span>
+      <span class="logo-sub">LAB</span>
+    </div>
+    <nav class="nav-links" aria-label="Menu principal">
+      <a href="#dashboard">Dashboard</a>
+      <a href="#pendientes">Preparados Pendientes</a>
+      <a href="#formulas">Biblioteca de Formulas</a>
+      <a href="#clientes">Clientes</a>
+      <a href="#stock">Stock</a>
+      <a href="#reportes">Reportes</a>
+    </nav>
+  </header>
+
+  <main class="page">
+    <!-- Vista general del laboratorio -->
+    <section id="dashboard" class="section">
+      <div class="section-head">
+        <p class="eyebrow">Panel</p>
+        <h1>Dashboard</h1>
+        <p class="muted">Resumen inicial del laboratorio. Mantiene un vistazo rapido a las operaciones clave.</p>
+      </div>
+      <div class="grid cards-3">
+        <article class="card">
+          <p class="label">Preparados hoy</p>
+          <h3 class="figure">--</h3>
+          <p class="muted">A la espera de registros reales.</p>
+        </article>
+        <article class="card">
+          <p class="label">Pedidos pendientes</p>
+          <h3 class="figure">--</h3>
+          <p class="muted">Se mostrara cuando haya datos cargados.</p>
+        </article>
+        <article class="card highlight">
+          <p class="label">Alertas</p>
+          <h3 class="figure">--</h3>
+          <p class="muted">Sin alertas registradas.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- Seccion de preparados pendientes funcional -->
+    <section id="pendientes" class="section">
+      <div class="section-head">
+        <p class="eyebrow">Produccion</p>
+        <h2>Preparados Pendientes</h2>
+        <p class="muted">Modulo para gestionar preparados con costos y estados.</p>
+      </div>
+
+      <div class="pending-layout">
+        <!-- Formulario de alta de preparados -->
+        <form id="prepForm" class="prep-form" aria-label="Registrar nuevo preparado">
+          <div class="form-row">
+            <label>Cliente
+              <input type="text" name="cliente" placeholder="Nombre del cliente" required>
+            </label>
+            <label>Formula
+              <input list="formulaOptions" type="text" name="formula" placeholder="Ej. Solucion 12B" required>
+              <datalist id="formulaOptions"></datalist>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Cantidad
+              <input type="number" name="cantidad" min="0.01" step="0.01" placeholder="Ej. 10.5" required>
+            </label>
+            <label>Forma farmaceutica
+              <select name="formaFarmaceutica" required>
+                <option value="Polvo">Polvo</option>
+                <option value="Capsulas">Capsulas</option>
+                <option value="Crema">Crema</option>
+                <option value="Serum">Serum</option>
+              </select>
+            </label>
+            <label>Unidad de medida
+              <select name="unidadMedida" required>
+                <option value="Gramos">Gramos</option>
+                <option value="Mililitros">Mililitros</option>
+                <option value="Unidades">Unidades</option>
+              </select>
+            </label>
+            <label>Fecha de carga
+              <input type="date" name="fechaCarga" required>
+            </label>
+            <label>Dia de entrega
+              <input type="date" name="diaEntrega" required>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Costo
+              <input type="number" name="costo" min="0" step="0.01" placeholder="Ej. 1200.50" required>
+            </label>
+            <label>Recargo (%)
+              <input type="number" name="recargo" min="0" step="0.01" placeholder="Ej. 35" required>
+            </label>
+            <label>Precio final
+              <input type="number" name="precioFinal" min="0" step="0.01" placeholder="Calculado" readonly>
+            </label>
+          </div>
+          <label>Observaciones
+            <textarea name="observaciones" rows="2" placeholder="Notas internas, condiciones especiales"></textarea>
+          </label>
+          <label class="file-label">PDF (opcional)
+            <input type="file" name="pdf" accept="application/pdf">
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn primary">Guardar preparado</button>
+            <p class="hint">El estado inicial siempre es <strong>Pendiente</strong>. Se puede avanzar a Listo y Entregado.</p>
+          </div>
+        </form>
+
+        <!-- Tablero de preparados listados -->
+        <div class="prep-board">
+          <div class="board-top">
+            <div class="search-group">
+              <input id="searchInput" type="search" placeholder="Buscar por cliente, formula, fechas o notas" aria-label="Buscar preparados">
+              <span class="kbd">Ctrl + F</span>
+            </div>
+            <div class="status-legend">
+              <span class="pill status status-pendiente">Pendiente</span>
+              <span class="pill status status-listo">Listo</span>
+              <span class="pill status status-entregado">Entregado</span>
+            </div>
+          </div>
+
+          <div id="prepList" class="prep-list" aria-live="polite"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Seccion de biblioteca de formulas -->
+    <section id="formulas" class="section">
+      <div class="section-head">
+        <p class="eyebrow">I+D</p>
+        <h2>Biblioteca de Formulas</h2>
+        <p class="muted">Gestiona formulas con ingredientes, cantidades y presentacion estandar.</p>
+      </div>
+      <div class="formula-layout">
+        <!-- Formulario para crear/editar formulas -->
+        <form id="formulaForm" class="formula-form" aria-label="Crear o editar formula">
+          <div class="form-row">
+            <label>Nombre del preparado
+              <input type="text" name="formulaNombre" placeholder="Ej. Serum hidratante" required>
+            </label>
+            <label>Forma farmaceutica
+              <select name="formulaForma" required>
+                <option value="Polvo">Polvo</option>
+                <option value="Capsulas">Capsulas</option>
+                <option value="Crema">Crema</option>
+                <option value="Serum">Serum</option>
+              </select>
+            </label>
+          </div>
+          <label>Presentacion estandar
+            <input type="text" name="formulaPresentacion" placeholder="Ej. 30 capsulas, 50 ml, 100 g" required>
+          </label>
+
+          <div class="ingredients-head">
+            <span>Ingredientes (nombre, cantidad por presentacion, unidad)</span>
+            <button type="button" class="btn ghost" id="addIngredientBtn">Agregar ingrediente</button>
+          </div>
+          <div id="ingredientsContainer" class="ingredients-container" aria-live="polite"></div>
+
+          <div class="form-actions">
+            <button type="submit" class="btn primary" id="formulaSubmitBtn">Guardar formula</button>
+            <button type="button" class="btn ghost" id="formulaResetBtn">Limpiar</button>
+            <p class="hint">La formula se almacena en memoria para uso interno.</p>
+          </div>
+        </form>
+
+        <!-- Listado de formulas -->
+        <div class="formula-board">
+          <div class="board-top">
+            <div class="search-group">
+              <input id="formulaSearch" type="search" placeholder="Buscar por nombre, forma, ingredientes o presentacion" aria-label="Buscar formulas">
+              <span class="kbd">Ctrl + F</span>
+            </div>
+            <div class="status-legend">
+              <span class="pill alert-pill">Formulas disponibles</span>
+            </div>
+          </div>
+          <div class="import-controls">
+            <button type="button" class="btn ghost" id="importBtn">Importar desde CSV/Excel</button>
+            <input type="file" id="importInput" accept=".csv, .xls, .xlsx" hidden>
+            <p class="hint">Columnas: Nombre del preparado, Ingrediente, Cantidad por presentacion, Unidad, Forma farmaceutica.</p>
+            <div id="importSummary" class="import-summary"></div>
+          </div>
+          <div id="formulaList" class="formula-list" aria-live="polite"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Seccion de clientes -->
+    <section id="clientes" class="section">
+      <div class="section-head">
+        <p class="eyebrow">Relaciones</p>
+        <h2>Clientes</h2>
+        <p class="muted">Gestione aqui los clientes de la farmacia.</p>
+      </div>
+      <div class="panel">
+        <div class="placeholder">No hay clientes registrados.</div>
+      </div>
+    </section>
+
+    <!-- Seccion de stock -->
+    <section id="stock" class="section">
+      <div class="section-head">
+        <p class="eyebrow">Inventario</p>
+        <h2>Stock</h2>
+        <p class="muted">Modulo funcional para controlar materias primas, lotes y alertas de vencimiento.</p>
+      </div>
+      <div class="stock-layout">
+        <!-- Formulario de alta de stock -->
+        <form id="stockForm" class="stock-form" aria-label="Registrar nuevo stock">
+          <div class="form-row">
+            <label>Materia prima
+              <input type="text" name="materiaPrima" placeholder="Ej. Acido salicilico" required>
+            </label>
+            <label>Cantidad
+              <input type="number" name="stockCantidad" min="0.01" step="0.01" placeholder="Ej. 250" required>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Unidad
+              <select name="stockUnidad" required>
+                <option value="Gramos">Gramos</option>
+                <option value="Mililitros">Mililitros</option>
+                <option value="Unidades">Unidades</option>
+              </select>
+            </label>
+            <label>Lote
+              <input type="text" name="lote" placeholder="Ej. L-2026-04" required>
+            </label>
+            <label>Fecha de vencimiento
+              <input type="date" name="fechaVenc" required>
+            </label>
+          </div>
+          <label>Proveedor
+            <input type="text" name="proveedor" placeholder="Empresa proveedora" required>
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn primary">Guardar stock</button>
+            <p class="hint">Se generan alertas por stock bajo o vencimiento proximo.</p>
+          </div>
+        </form>
+
+        <!-- Tablero de stock listado -->
+        <div class="stock-board">
+          <div class="board-top">
+            <div class="search-group">
+              <input id="stockSearch" type="search" placeholder="Buscar por materia, lote, proveedor o fechas" aria-label="Buscar stock">
+              <span class="kbd">Ctrl + F</span>
+            </div>
+            <div class="status-legend">
+              <span class="pill alert-pill alert-low">Stock bajo</span>
+              <span class="pill alert-pill alert-exp">Vence pronto</span>
+            </div>
+          </div>
+          <div id="stockList" class="stock-list" aria-live="polite"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Seccion de reportes -->
+    <section id="reportes" class="section">
+      <div class="section-head">
+        <p class="eyebrow">Analitica</p>
+        <h2>Reportes</h2>
+        <p class="muted">Reporte de operaciones y lotes.</p>
+      </div>
+      <div class="panel">
+        <div class="placeholder">No hay reportes disponibles.</div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Pie de pagina simple -->
+  <footer class="footer">
+    <p>Copyright 2026 Guimerans Lab. Todos los derechos reservados.</p>
+  </footer>
+
+  <!-- Script principal (logica del modulo) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/supabase.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
