@@ -6,6 +6,7 @@ const STATUS_FLOW = ['Pendiente', 'Listo', 'Entregado'];
 // Estado temporal en memoria (se reemplazara por base de datos real luego)
 const state = {
   items: [],       // Preparados pendientes
+  editingId: null,
   stockItems: [],  // Inventario de materias primas
   formulas: []     // Biblioteca de formulas
 };
@@ -86,13 +87,27 @@ function createIngredientRow(data = {}) {
 }
 
 /** Avanza el estado de un preparado respetando el flujo definido */
-function advanceStatus(id) {
+async function advanceStatus(id) {
   const item = state.items.find((p) => p.id === id);
   if (!item) return;
+
   const currentIndex = STATUS_FLOW.indexOf(item.status);
-  if (currentIndex < STATUS_FLOW.length - 1) {
-    item.status = STATUS_FLOW[currentIndex + 1];
+  if (currentIndex >= STATUS_FLOW.length - 1) return;
+
+  const nextStatus = STATUS_FLOW[currentIndex + 1];
+
+  const { error } = await supabaseClient
+    .from('preparados')
+    .update({ estado: nextStatus })
+    .eq('id', id);
+
+  if (error) {
+    console.error('Error actualizando estado en Supabase:', error);
+    alert('No se pudo actualizar el estado.');
+    return;
   }
+
+  item.status = nextStatus;
   renderList(searchInput.value);
 }
 
@@ -173,25 +188,56 @@ function renderList(term = '') {
       </div>
       <p class="meta">Notas: ${item.observaciones || 'Sin observaciones'}</p>
       <div class="row">
-        <div class="meta">PDF: ${item.pdf ? `<a class="pdf-link" href="${item.pdf.url}" target="_blank" rel="noopener">${item.pdf.name}</a>` : 'No adjuntado'}</div>
-        <div class="actions">
-  <button class="btn ghost" data-action="advance" ${item.status === 'Entregado' ? 'disabled' : ''}>${nextLabel}</button>
-  <button class="btn ghost" data-action="delete">Eliminar</button>
-</div>s
-      </div>
+  <div class="meta">
+    PDF: ${item.pdf ? `<a class="pdf-link" href="${item.pdf.url}" target="_blank" rel="noopener">${item.pdf.name}</a>` : 'No adjuntado'}
+  </div>
+
+  <div class="actions">
+    <button class="btn ghost" data-action="advance" ${item.status === 'Entregado' ? 'disabled' : ''}>${nextLabel}</button>
+    <button class="btn ghost" data-action="edit">Editar</button>
+    <button class="btn ghost" data-action="delete">Eliminar</button>
+  </div>
+</div>
     `;
 
     const advanceBtn = card.querySelector('[data-action="advance"]');
-    if (advanceBtn) {
-      advanceBtn.addEventListener('click', () => advanceStatus(item.id));
-    }
-    const deleteBtn = card.querySelector('[data-action="delete"]');
+if (advanceBtn) {
+  advanceBtn.addEventListener('click', () => advanceStatus(item.id));
+}
+
+const editBtn = card.querySelector('[data-action="edit"]');
+if (editBtn) {
+  editBtn.addEventListener('click', () => editPreparado(item.id));
+}
+
+const deleteBtn = card.querySelector('[data-action="delete"]');
 if (deleteBtn) {
   deleteBtn.addEventListener('click', () => deletePreparado(item.id));
 }
 
     listContainer.appendChild(card);
   });
+  function editPreparado(id) {
+  const item = state.items.find(item => item.id === id);
+  if (!item) return;
+
+  state.editingId = id;
+
+  form.cliente.value = item.cliente || '';
+  form.formula.value = item.formula || '';
+  form.cantidad.value = item.cantidad || '';
+  form.formaFarmaceutica.value = item.formaFarmaceutica || '';
+  form.unidadMedida.value = item.unidadMedida || '';
+  form.fechaCarga.value = item.fechaCarga || '';
+  form.diaEntrega.value = item.diaEntrega || '';
+  form.observaciones.value = item.observaciones || '';
+  form.costo.value = item.costo ?? '';
+  form.recargo.value = item.recargo ?? '';
+
+  updatePrecioFinalUI();
+
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 }async function deletePreparado(id) {
   const confirmar = confirm('¿Querés eliminar este preparado?');
   if (!confirmar) return;
@@ -343,8 +389,13 @@ async function handleSubmit(event) {
     createdAt: Date.now()
   };
 
-  const { error } = await supabaseClient.from('preparados').insert([
-    {
+  let error;
+let insertedRow = null;
+
+if (state.editingId) {
+  const result = await supabaseClient
+    .from('preparados')
+    .update({
       cliente: newItem.cliente,
       formula: newItem.formula,
       cantidad: newItem.cantidad,
@@ -353,12 +404,41 @@ async function handleSubmit(event) {
       fecha_carga: newItem.fechaCarga || null,
       dia_entrega: newItem.diaEntrega || null,
       observaciones: newItem.observaciones,
-      estado: newItem.status,
       costo: newItem.costo,
       porcentaje_recargo: newItem.recargo,
       precio_final: newItem.precioFinal
-    }
-  ]);
+    })
+    .eq('id', state.editingId)
+    .select()
+    .single();
+
+  error = result.error;
+} else {
+  const result = await supabaseClient
+    .from('preparados')
+    .insert([
+      {
+        cliente: newItem.cliente,
+        formula: newItem.formula,
+        cantidad: newItem.cantidad,
+        forma_farmaceutica: newItem.formaFarmaceutica,
+        unidad: newItem.unidadMedida,
+        fecha_carga: newItem.fechaCarga || null,
+        dia_entrega: newItem.diaEntrega || null,
+        observaciones: newItem.observaciones,
+        estado: newItem.status,
+        costo: newItem.costo,
+        porcentaje_recargo: newItem.recargo,
+        precio_final: newItem.precioFinal
+      }
+    ])
+    .select()
+    .single();
+
+  error = result.error;
+  insertedRow = result.data;
+} 
+
 
   if (error) {
     console.error('Error guardando en Supabase:', error);
@@ -366,7 +446,21 @@ async function handleSubmit(event) {
     return;
   }
 
-  state.items.push(newItem);
+  if (state.editingId) {
+  state.items = state.items.map(item =>
+    item.id === state.editingId
+      ? { ...item, ...newItem, id: state.editingId }
+      : item
+  );
+} else {
+  state.items.push({
+    ...newItem,
+    id: insertedRow?.id || newItem.id,
+    createdAt: insertedRow?.created_at
+      ? new Date(insertedRow.created_at).getTime()
+      : newItem.createdAt
+  });
+}
   renderList();
   form.reset();
   updatePrecioFinalUI();
