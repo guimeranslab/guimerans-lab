@@ -292,12 +292,21 @@ stockList.innerHTML = filtered.map(item => `
     Lote: ${item.lote || '-'}<br>
     Proveedor: ${item.proveedor || '-'}<br>
     Vence: ${item.fecha_vencimiento || '-'}<br>
+    <button type="button" class="edit-stock-btn" data-id="${item.id}">Editar</button>
     <button type="button" class="delete-stock-btn" data-id="${item.id}">Eliminar</button>
     <hr>
   </div>
 `).join('');
 
   const deleteButtons = stockList.querySelectorAll('.delete-stock-btn');
+  const editButtons = stockList.querySelectorAll('.edit-stock-btn');
+
+editButtons.forEach(button => {
+  button.addEventListener('click', () => {
+    const id = button.dataset.id;
+    handleEditStock(id);
+  });
+});
 
   deleteButtons.forEach(button => {
     button.addEventListener('click', () => {
@@ -885,4 +894,31 @@ async function renderStockDesdeSupabase() {
 
   state.stockItems = data || [];
   renderStockList(stockSearch?.value || '');
+}
+async function handleEditStock(id) {
+  const nuevoStock = prompt("Nueva cantidad:");
+
+  if (nuevoStock === null) return;
+
+  const cantidad = parseFloat(nuevoStock);
+
+  if (isNaN(cantidad)) {
+    alert("Cantidad inválida");
+    return;
+  }
+
+  const { error } = await supabaseClient
+    .from("materias_primas")
+    .update({ stock_actual: cantidad })
+    .eq("id", id);
+
+  if (error) {
+    console.error(error);
+    alert("Error al actualizar");
+    return;
+  }
+
+  alert("Stock actualizado");
+
+  await renderStockDesdeSupabase();
 }
