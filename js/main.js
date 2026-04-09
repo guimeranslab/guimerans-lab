@@ -259,48 +259,51 @@ if (deleteBtn) {
 }
 
 /** Renderiza la lista de stock aplicando filtro y marcando alertas */
-function renderStockList(term = '') {
-  stockList.innerHTML = '';
-  const filtered = state.stockItems
-    .filter((item) => matchesSearch({
-      ...item,
-      cantidad: item.cantidad,
-      fechaCarga: item.fechaVenc,
-      diaEntrega: item.fechaVenc,
-      observaciones: item.proveedor
-    }, term))
-    .sort((a, b) => new Date(a.fechaVenc) - new Date(b.fechaVenc));
+function renderStockList(filter = '') {
+  if (!stockList) return;
 
-  if (!filtered.length) {
-    stockList.innerHTML = '<div class="empty-state">No hay stock cargado.</div>';
+  const query = String(filter).toLowerCase().trim();
+
+  const filtered = state.stockItems.filter(item => {
+    const texto = [
+      item.nombre,
+      item.lote,
+      item.proveedor,
+      item.fecha_vencimiento,
+      item.unidad_base
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+
+    return texto.includes(query);
+  });
+
+  if (filtered.length === 0) {
+    stockList.innerHTML = `<div class="placeholder">No hay stock cargado.</div>`;
     return;
   }
 
-  filtered.forEach((item) => {
-    const card = document.createElement('article');
-    card.className = 'stock-card';
+  
+stockList.innerHTML = filtered.map(item => `
+  <div class="stock-item">
+    <strong>${item.nombre}</strong><br>
+    Cantidad: ${item.stock_actual} ${item.unidad_base}<br>
+    Lote: ${item.lote || '-'}<br>
+    Proveedor: ${item.proveedor || '-'}<br>
+    Vence: ${item.fecha_vencimiento || '-'}<br>
+    <button type="button" class="delete-stock-btn" data-id="${item.id}">Eliminar</button>
+    <hr>
+  </div>
+`).join('');
 
-    const low = isLowStock(item);
-    const exp = isExpiringSoon(item.fechaVenc, 7);
+  const deleteButtons = stockList.querySelectorAll('.delete-stock-btn');
 
-    const alerts = [];
-    if (low) alerts.push('<span class="pill alert-pill alert-low">Stock bajo</span>');
-    if (exp) alerts.push('<span class="pill alert-pill alert-exp">Vence pronto</span>');
-
-    card.innerHTML = `
-      <div class="title-line">
-        <span>${item.materiaPrima}</span>
-        <span class="badge">${item.lote}</span>
-      </div>
-      <div class="row">
-        <span class="stock-meta">Cantidad: <strong>${formatCantidad(item)}</strong></span>
-        <span class="stock-meta">Vence: ${item.fechaVenc}</span>
-        <span class="stock-meta">Proveedor: ${item.proveedor}</span>
-      </div>
-      <div class="alert-row">${alerts.join(' ') || '<span class="stock-meta">Sin alertas</span>'}</div>
-    `;
-
-    stockList.appendChild(card);
+  deleteButtons.forEach(button => {
+    button.addEventListener('click', () => {
+      const id = button.dataset.id;
+      handleDeleteStock(id);
+    });
   });
 }
 
@@ -580,25 +583,54 @@ function handleAddIngredient() {
 }
 
 /** Guarda un nuevo item de stock en memoria */
-function handleStockSubmit(event) {
+async function handleStockSubmit(event) {
   event.preventDefault();
+
   const formData = new FormData(stockForm);
 
-  const newItem = {
-    id: genId(),
-    materiaPrima: formData.get('materiaPrima').trim(),
-    cantidad: Number(formData.get('stockCantidad')),
-    unidadMedida: formData.get('stockUnidad'),
-    lote: formData.get('lote').trim(),
-    fechaVenc: formData.get('fechaVenc'),
-    proveedor: formData.get('proveedor').trim(),
-    createdAt: Date.now()
+  const nuevaMateria = {
+    nombre: formData.get('materiaPrima')?.trim() || '',
+    tipo: null,
+    unidad_base: formData.get('stockUnidad') || '',
+    stock_actual: parseFloat(formData.get('stockCantidad')) || 0,
+    stock_minimo: 0,
+    costo_unitario: 0,
+    lote: formData.get('lote')?.trim() || '',
+    fecha_vencimiento: formData.get('fechaVenc') || null,
+    proveedor: formData.get('proveedor')?.trim() || ''
   };
 
-  state.stockItems.push(newItem);
+  const { error } = await supabaseClient
+    .from('materias_primas')
+    .insert([nuevaMateria]);
+
+  if (error) {
+    console.error('Error al guardar stock:', error);
+    alert('Error al guardar stock');
+    return;
+  }
+
   stockForm.reset();
-  renderStockList(stockSearch.value);
+  await renderStockDesdeSupabase();
 }
+async function handleDeleteStock(id) {
+  const confirmar = confirm("¿Eliminar esta materia prima?");
+  if (!confirmar) return;
+
+  const { error } = await supabaseClient
+    .from('materias_primas')
+    .delete()
+    .eq('id', id);
+
+  if (error) {
+    console.error('Error al eliminar:', error);
+    alert('Error al eliminar');
+    return;
+  }
+
+  await renderStockDesdeSupabase();
+}
+
 
 /** Filtra stock por cualquier campo */
 function handleStockSearch(event) {
@@ -817,7 +849,7 @@ async function init() {
   }
 
   if (stockForm && stockList && stockSearch) {
-    renderStockList();
+    await renderStockDesdeSupabase();
     stockForm.addEventListener('submit', handleStockSubmit);
     stockSearch.addEventListener('input', handleStockSearch);
   }
@@ -837,3 +869,20 @@ async function init() {
 }
 
 init();
+renderStockDesdeSupabase();
+
+
+async function renderStockDesdeSupabase() {
+  const { data, error } = await supabaseClient
+    .from('materias_primas')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Error al cargar stock:', error);
+    return;
+  }
+
+  state.stockItems = data || [];
+  renderStockList(stockSearch?.value || '');
+}
