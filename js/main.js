@@ -25,6 +25,7 @@ const formulaList = document.getElementById('formulaList');
 const formulaSearch = document.getElementById('formulaSearch');
 const formulaResetBtn = document.getElementById('formulaResetBtn');
 const formulaSubmitBtn = document.getElementById('formulaSubmitBtn');
+const formulaCostLabel = document.getElementById('formulaCostLabel');
 const importBtn = document.getElementById('importBtn');
 const importInput = document.getElementById('importInput');
 const importSummary = document.getElementById('importSummary');
@@ -32,6 +33,7 @@ const stockEditModal = document.getElementById('stockEditModal');
 const stockEditForm = document.getElementById('stockEditForm');
 const stockEditCloseBtn = stockEditModal?.querySelector('.modal-close');
 const stockEditCancelBtn = stockEditModal?.querySelector('.modal-cancel');
+const formulaInput = form?.querySelector('input[name="formula"]');
 const costoInput = form?.querySelector('input[name="costo"]');
 const recargoInput = form?.querySelector('input[name="recargo"]');
 const precioFinalInput = form?.querySelector('input[name="precioFinal"]');
@@ -124,23 +126,71 @@ function isLowStock(item) {
   return Number(item.cantidad) <= limite;
 }
 
-/** Crea un nodo de fila de ingrediente con datos opcionales */
+/** Genera HTML de opciones de materias primas */
+function buildMateriaOptions(selectedId) {
+  if (!state.stockItems.length) {
+    return '<option value="">Cargá materias primas en Stock</option>';
+  }
+  return state.stockItems
+    .map((item) => {
+      const selected = String(item.id) === String(selectedId) ? 'selected' : '';
+      return `<option value="${item.id}" ${selected}>${item.nombre} — ${item.unidad_base || ''}</option>`;
+    })
+    .join('');
+}
+
+/** Crea un nodo de fila de componente vinculado a materias primas reales */
 function createIngredientRow(data = {}) {
   const row = document.createElement('div');
   row.className = 'ingredient-row';
+  const opciones = buildMateriaOptions(data.materia_prima_id);
+  const unidad = data.unidad || (state.stockItems.find((m) => String(m.id) === String(data.materia_prima_id))?.unidad_base) || 'Gramos';
+
   row.innerHTML = `
-    <input type="text" name="ingNombre" placeholder="Ingrediente" value="${data.nombre || ''}" required>
+    <select name="ingMateriaId" required ${state.stockItems.length ? '' : 'disabled'}>
+      <option value="" disabled ${data.materia_prima_id ? '' : 'selected'}>Seleccioná materia prima</option>
+      ${opciones}
+    </select>
     <input type="number" name="ingCantidad" min="0.01" step="0.01" placeholder="Cantidad" value="${data.cantidad ?? ''}" required>
     <select name="ingUnidad" required>
-      <option value="Gramos" ${data.unidad === 'Gramos' ? 'selected' : ''}>Gramos</option>
-      <option value="Mililitros" ${data.unidad === 'Mililitros' ? 'selected' : ''}>Mililitros</option>
-      <option value="Unidades" ${data.unidad === 'Unidades' ? 'selected' : ''}>Unidades</option>
+      <option value="Gramos" ${unidad === 'Gramos' ? 'selected' : ''}>Gramos</option>
+      <option value="Mililitros" ${unidad === 'Mililitros' ? 'selected' : ''}>Mililitros</option>
+      <option value="Unidades" ${unidad === 'Unidades' ? 'selected' : ''}>Unidades</option>
     </select>
+    <input type="text" name="ingObs" placeholder="Observaciones" value="${data.observaciones || ''}">
     <button type="button" class="remove-ingredient">Quitar</button>
   `;
+
   const removeBtn = row.querySelector('.remove-ingredient');
-  removeBtn.addEventListener('click', () => row.remove());
+  removeBtn.addEventListener('click', () => {
+    row.remove();
+    updateFormulaCostUI();
+  });
+
+  const cantidadInput = row.querySelector('input[name="ingCantidad"]');
+  const materiaSelect = row.querySelector('select[name="ingMateriaId"]');
+
+  cantidadInput?.addEventListener('input', updateFormulaCostUI);
+  materiaSelect?.addEventListener('change', updateFormulaCostUI);
+
   return row;
+}
+
+/** Actualiza los selects de materia prima existentes con el catalogo actual */
+function refreshIngredientRowsOptions() {
+  if (!ingredientsContainer) return;
+  const rows = ingredientsContainer.querySelectorAll('.ingredient-row');
+  rows.forEach((row) => {
+    const select = row.querySelector('select[name="ingMateriaId"]');
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = `
+      <option value="" disabled ${current ? '' : 'selected'}>Seleccioná materia prima</option>
+      ${buildMateriaOptions(current)}
+    `;
+    select.disabled = state.stockItems.length === 0;
+    if (current) select.value = current;
+  });
 }
 
 /** Avanza el estado de un preparado respetando el flujo definido */
@@ -192,7 +242,7 @@ function matchesSearch(item, term) {
 /** Filtra formulas buscando en nombre, forma, presentacion e ingredientes */
 function matchesFormulaSearch(item, term) {
   if (!term) return true;
-  const ingText = item.ingredientes
+  const ingText = (item.ingredientes || [])
     .map((ing) => `${ing.nombre} ${ing.cantidad} ${ing.unidad}`)
     .join(' ');
   const target = [
@@ -202,6 +252,62 @@ function matchesFormulaSearch(item, term) {
     ingText
   ].join(' ').toLowerCase();
   return target.includes(term.toLowerCase());
+}
+
+/** Calcula el costo total de una formula a partir de sus componentes */
+function calcFormulaCost(componentes = [], materiaMapOverride) {
+  const materiaMap = materiaMapOverride || new Map(state.stockItems.map((m) => [String(m.id), m]));
+  return componentes.reduce((acc, comp) => {
+    const materia = materiaMap.get(String(comp.materia_prima_id));
+    const costoUnitario = materia ? Number(materia.costo_unitario) : Number(comp.costo_unitario ?? 0);
+    const cantidad = Number(comp.cantidad) || 0;
+    if (!isNaN(costoUnitario) && !isNaN(cantidad)) {
+      acc += cantidad * costoUnitario;
+    }
+    return acc;
+  }, 0);
+}
+
+/** Devuelve una formula por nombre (case-insensitive) */
+function findFormulaByName(nombre) {
+  if (!nombre) return null;
+  const normalized = nombre.trim().toLowerCase();
+  return state.formulas.find((f) => f.nombre?.trim().toLowerCase() === normalized) || null;
+}
+
+/** Completa el campo costo segun el costo estimado de la formula elegida */
+function autofillCostoDesdeFormula(nombre) {
+  if (!costoInput) return;
+  const target = nombre?.trim();
+  if (!target) {
+    costoInput.value = '';
+    updatePrecioFinalUI();
+    return;
+  }
+
+  const formula = findFormulaByName(target);
+  if (!formula) return;
+
+  const costo = Number(formula.costoEstimado);
+  costoInput.value = isNaN(costo) ? '0' : costo.toFixed(2);
+  updatePrecioFinalUI();
+}
+
+/** Recalcula costo estimado y lo muestra en el formulario */
+function updateFormulaCostUI() {
+  if (!formulaCostLabel || !ingredientsContainer) return;
+  const rows = Array.from(ingredientsContainer.querySelectorAll('.ingredient-row'));
+  const materiaMap = new Map(state.stockItems.map((m) => [String(m.id), m]));
+  const total = rows.reduce((acc, row) => {
+    const materiaId = row.querySelector('select[name="ingMateriaId"]')?.value;
+    const cantidad = Number(row.querySelector('input[name="ingCantidad"]')?.value);
+    if (!materiaId || isNaN(cantidad)) return acc;
+    const materia = materiaMap.get(String(materiaId));
+    const costoUnit = Number(materia?.costo_unitario);
+    if (isNaN(costoUnit)) return acc;
+    return acc + cantidad * costoUnit;
+  }, 0);
+  formulaCostLabel.textContent = `$${total.toFixed(2)}`;
 }
 
 // ---- Render de interfaz ----
@@ -370,6 +476,7 @@ function renderStockList(filter = '') {
         </div>
         <div class="row stock-row">
           <span class="stock-meta">Cantidad: <strong>${item.stock_actual} ${item.unidad_base}</strong></span>
+          <span class="stock-meta">Costo unitario: <strong>$${Number(item.costo_unitario ?? 0).toFixed(2)}</strong></span>
           <span class="stock-meta">Proveedor: ${item.proveedor || '-'}</span>
           <span class="stock-meta">Vence: ${item.fecha_vencimiento || '-'}</span>
         </div>
@@ -413,8 +520,11 @@ function renderFormulaList(term = '') {
     const card = document.createElement('article');
     card.className = 'formula-card';
 
-    const ingList = item.ingredientes
-      .map((ing) => `<li>${ing.nombre} — <strong>${ing.cantidad}</strong> ${ing.unidad}</li>`)
+    const ingList = (item.ingredientes || [])
+      .map((ing) => {
+        const nota = ing.observaciones ? ` · ${ing.observaciones}` : '';
+        return `<li>${ing.nombre} — <strong>${ing.cantidad}</strong> ${ing.unidad}${nota}</li>`;
+      })
       .join('');
 
     card.innerHTML = `
@@ -430,6 +540,7 @@ function renderFormulaList(term = '') {
         <ul class="formula-meta" style="padding-left:18px; margin: 4px 0 8px 0;">${ingList}</ul>
       </div>
       <div class="row">
+        <div class="formula-meta">Costo estimado: <strong>$${Number(item.costoEstimado ?? 0).toFixed(2)}</strong></div>
         <div class="formula-meta">ID: ${item.id}</div>
         <div class="actions">
           <button class="btn ghost" data-action="edit">Editar</button>
@@ -580,25 +691,36 @@ function updatePrecioFinalUI() {
 /** Recolecta ingredientes desde el formulario con validacion basica */
 function collectIngredients() {
   const rows = Array.from(ingredientsContainer.querySelectorAll('.ingredient-row'));
+  const materiaMap = new Map(state.stockItems.map((m) => [String(m.id), m]));
+
   const ingredients = rows.map((row) => {
-    const nombre = row.querySelector('input[name="ingNombre"]').value.trim();
+    const materiaId = row.querySelector('select[name="ingMateriaId"]').value;
     const cantidad = Number(row.querySelector('input[name="ingCantidad"]').value);
     const unidad = row.querySelector('select[name="ingUnidad"]').value;
-    return { nombre, cantidad, unidad };
+    const observaciones = row.querySelector('input[name="ingObs"]')?.value?.trim() || '';
+    const materia = materiaMap.get(String(materiaId));
+    return {
+      materia_prima_id: materiaId ? Number(materiaId) : null,
+      nombre: materia?.nombre || '',
+      cantidad,
+      unidad,
+      observaciones,
+      costo_unitario: Number(materia?.costo_unitario) || 0
+    };
   });
 
   const invalid = ingredients.find(
-    (ing) => !ing.nombre || isNaN(ing.cantidad) || ing.cantidad <= 0 || !['Gramos', 'Mililitros', 'Unidades'].includes(ing.unidad)
+    (ing) => !ing.materia_prima_id || isNaN(ing.cantidad) || ing.cantidad <= 0 || !['Gramos', 'Mililitros', 'Unidades'].includes(ing.unidad)
   );
   if (invalid) {
-    alert('Verifica ingredientes: nombre requerido, cantidad positiva y unidad valida.');
+    alert('Selecciona una materia prima y cantidad valida para cada componente.');
     return null;
   }
   return ingredients;
 }
 
 /** Maneja alta/edicion de formula */
-function handleFormulaSubmit(event) {
+async function handleFormulaSubmit(event) {
   event.preventDefault();
   if (!ingredientsContainer) return;
 
@@ -610,24 +732,86 @@ function handleFormulaSubmit(event) {
   }
 
   const payload = {
-    id: editingFormulaId || genId(),
     nombre: formData.get('formulaNombre').trim(),
-    forma: formData.get('formulaForma'),
-    presentacion: formData.get('formulaPresentacion').trim(),
-    ingredientes,
-    createdAt: editingFormulaId ? Date.now() : Date.now()
+    forma_farmaceutica: formData.get('formulaForma'),
+    presentacion_estandar: formData.get('formulaPresentacion').trim()
   };
 
+  let formulaId = editingFormulaId;
+
   if (editingFormulaId) {
-    const idx = state.formulas.findIndex((f) => f.id === editingFormulaId);
-    if (idx >= 0) state.formulas[idx] = payload;
+    const { data, error } = await supabaseClient
+      .from('formulas')
+      .update(payload)
+      .eq('id', editingFormulaId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Error actualizando formula:', error);
+      alert('No se pudo actualizar la formula.');
+      return;
+    }
+
+    formulaId = data?.id || editingFormulaId;
+
+    const { error: deleteError } = await supabaseClient
+      .from('formula_componentes')
+      .delete()
+      .eq('formula_id', formulaId);
+
+    if (deleteError) {
+      console.error('Error limpiando componentes:', deleteError);
+      alert('No se pudo actualizar los componentes de la formula.');
+      return;
+    }
   } else {
-    state.formulas.push(payload);
+    const { data, error } = await supabaseClient
+      .from('formulas')
+      .insert([payload])
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Error creando formula:', error);
+      alert('No se pudo crear la formula.');
+      return;
+    }
+
+    formulaId = data?.id;
   }
 
+  if (!formulaId) {
+    alert('No se pudo obtener el ID de la formula.');
+    return;
+  }
+
+  if (ingredientes.length) {
+    const componentesPayload = ingredientes.map((ing) => ({
+      formula_id: formulaId,
+      materia_prima_id: ing.materia_prima_id,
+      cantidad: ing.cantidad,
+      unidad: ing.unidad,
+      observaciones: ing.observaciones || null
+    }));
+
+    const { error: insertComponentesError } = await supabaseClient
+      .from('formula_componentes')
+      .insert(componentesPayload);
+
+    if (insertComponentesError) {
+      console.error('Error guardando componentes:', insertComponentesError);
+      alert('La formula se guardo pero hubo un problema con sus componentes.');
+      await loadFormulasDesdeSupabase();
+      return;
+    }
+  }
+
+  await loadFormulasDesdeSupabase();
   resetFormulaForm();
   renderFormulaList(formulaSearch.value);
   refreshFormulaOptions();
+  alert('Formula guardada correctamente.');
 }
 
 /** Busca en formulas */
@@ -647,10 +831,37 @@ function startEditFormula(id) {
   ingredientsContainer.innerHTML = '';
   item.ingredientes.forEach((ing) => ingredientsContainer.appendChild(createIngredientRow(ing)));
   formulaSubmitBtn.textContent = 'Actualizar formula';
+  updateFormulaCostUI();
+  formulaForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 /** Elimina una formula por id */
-function deleteFormula(id) {
+async function deleteFormula(id) {
+  const confirmar = confirm('¿Eliminar esta formula y sus componentes?');
+  if (!confirmar) return;
+
+  const { error: compError } = await supabaseClient
+    .from('formula_componentes')
+    .delete()
+    .eq('formula_id', id);
+
+  if (compError) {
+    console.error('Error eliminando componentes:', compError);
+    alert('No se pudo eliminar los componentes de la formula.');
+    return;
+  }
+
+  const { error } = await supabaseClient
+    .from('formulas')
+    .delete()
+    .eq('id', id);
+
+  if (error) {
+    console.error('Error eliminando formula:', error);
+    alert('No se pudo eliminar la formula.');
+    return;
+  }
+
   state.formulas = state.formulas.filter((f) => f.id !== id);
   if (editingFormulaId === id) resetFormulaForm();
   renderFormulaList(formulaSearch.value);
@@ -663,12 +874,14 @@ function resetFormulaForm() {
   ingredientsContainer.innerHTML = '';
   ingredientsContainer.appendChild(createIngredientRow());
   formulaSubmitBtn.textContent = 'Guardar formula';
+  updateFormulaCostUI();
   refreshFormulaOptions();
 }
 
 /** Agrega una fila de ingrediente vacia */
 function handleAddIngredient() {
   ingredientsContainer.appendChild(createIngredientRow());
+  updateFormulaCostUI();
 }
 
 /** Guarda un nuevo item de stock en memoria */
@@ -677,13 +890,16 @@ async function handleStockSubmit(event) {
 
   const formData = new FormData(stockForm);
 
+  const stockMinimo = parseFloat(formData.get('stockMinimo'));
+  const costoUnitario = parseFloat(formData.get('costoUnitario'));
+
   const nuevaMateria = {
     nombre: formData.get('materiaPrima')?.trim() || '',
     tipo: null,
     unidad_base: formData.get('stockUnidad') || '',
     stock_actual: parseFloat(formData.get('stockCantidad')) || 0,
-    stock_minimo: 0,
-    costo_unitario: 0,
+    stock_minimo: isNaN(stockMinimo) ? 0 : stockMinimo,
+    costo_unitario: isNaN(costoUnitario) ? 0 : costoUnitario,
     lote: formData.get('lote')?.trim() || '',
     fecha_vencimiento: formData.get('fechaVenc') || null,
     proveedor: formData.get('proveedor')?.trim() || ''
@@ -701,6 +917,7 @@ async function handleStockSubmit(event) {
 
   stockForm.reset();
   await renderStockDesdeSupabase();
+  await loadFormulasDesdeSupabase();
 }
 
 async function handleStockEditSubmit(event) {
@@ -731,6 +948,7 @@ async function handleStockEditSubmit(event) {
 
   closeStockEditModal();
   await renderStockDesdeSupabase();
+  await loadFormulasDesdeSupabase();
   alert('Stock actualizado.');
 }
 
@@ -750,6 +968,7 @@ async function handleDeleteStock(id) {
   }
 
   await renderStockDesdeSupabase();
+  await loadFormulasDesdeSupabase();
 }
 
 
@@ -870,20 +1089,87 @@ function processImportedRows(rawRows) {
   return Array.from(grouped.values());
 }
 
-/** Inserta o actualiza formulas importadas en el estado */
-function upsertImportedFormulas(formulas) {
-  formulas.forEach((formula) => {
+/** Inserta o actualiza formulas importadas directamente en Supabase */
+async function upsertImportedFormulas(formulas) {
+  const materiaMap = await getMateriaMapFresh();
+  const materiasList = Array.from(materiaMap.values());
+  const missingMaterias = new Set();
+
+  for (const formula of formulas) {
     const existing = state.formulas.find((f) => f.nombre.toLowerCase() === formula.nombre.toLowerCase());
-    if (existing) {
-      formula.id = existing.id;
-      Object.assign(existing, formula);
+    let formulaId = existing?.id || null;
+
+    const payload = {
+      nombre: formula.nombre,
+      forma: formula.forma,
+      presentacion: formula.presentacion
+    };
+
+    if (formulaId) {
+      const { data, error } = await supabaseClient
+        .from('formulas')
+        .update(payload)
+        .eq('id', formulaId)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Error actualizando formula importada:', error);
+        continue;
+      }
+
+      formulaId = data?.id || formulaId;
+
+      await supabaseClient.from('formula_componentes').delete().eq('formula_id', formulaId);
     } else {
-      formula.id = genId();
-      state.formulas.push(formula);
+      const { data, error } = await supabaseClient
+        .from('formulas')
+        .insert([payload])
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Error creando formula importada:', error);
+        continue;
+      }
+
+      formulaId = data?.id;
     }
-  });
-  renderFormulaList(formulaSearch?.value || '');
-  refreshFormulaOptions();
+
+    const componentesPayload = [];
+    formula.ingredientes.forEach((ing) => {
+      const materia = materiasList.find(
+        (m) => m.nombre.toLowerCase() === ing.nombre.toLowerCase()
+      );
+      if (materia) {
+        componentesPayload.push({
+          formula_id: formulaId,
+          materia_prima_id: materia.id,
+          cantidad: ing.cantidad,
+          unidad: ing.unidad,
+          observaciones: null
+        });
+      } else {
+        missingMaterias.add(ing.nombre);
+      }
+    });
+
+    if (componentesPayload.length) {
+      const { error: compError } = await supabaseClient
+        .from('formula_componentes')
+        .insert(componentesPayload);
+
+      if (compError) {
+        console.error('Error guardando componentes importados:', compError);
+      }
+    }
+  }
+
+  await loadFormulasDesdeSupabase();
+
+  if (missingMaterias.size) {
+    alert(`Componentes omitidos por falta de materia prima en stock: ${Array.from(missingMaterias).join(', ')}`);
+  }
 }
 
 /** Manejador del input de archivo */
@@ -896,7 +1182,7 @@ function handleImportFile(event) {
 
   reader.onerror = () => alert('No se pudo leer el archivo.');
 
-  reader.onload = (e) => {
+  reader.onload = async (e) => {
     try {
       const result = e.target.result;
       let rows = [];
@@ -910,7 +1196,7 @@ function handleImportFile(event) {
       }
       const formulas = processImportedRows(rows);
       if (formulas.length) {
-        upsertImportedFormulas(formulas);
+        await upsertImportedFormulas(formulas);
         importSummary.textContent = `Importacion exitosa: ${formulas.length} preparado(s) -> ${formulas.map((f) => f.nombre).join(', ')}`;
       }
     } catch (err) {
@@ -958,19 +1244,107 @@ async function cargarPreparados() {
     createdAt: new Date(item.created_at).getTime()
   }));
 }
+
+/** Obtiene mapa fresco de materias primas desde Supabase, asegura costo_unitario actualizado */
+async function getMateriaMapFresh() {
+  const { data, error } = await supabaseClient
+    .from('materias_primas')
+    .select('id, nombre, unidad_base, costo_unitario');
+
+  if (error) {
+    console.error('Error cargando materias primas para costos:', error);
+    return new Map(state.stockItems.map((m) => [String(m.id), m]));
+  }
+
+  state.stockItems = data || [];
+  refreshIngredientRowsOptions();
+
+  return new Map((data || []).map((m) => [String(m.id), m]));
+}
+
+async function loadFormulasDesdeSupabase() {
+  const materiaMap = await getMateriaMapFresh();
+
+  const { data: formulasData, error: formulasError } = await supabaseClient
+    .from('formulas')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (formulasError) {
+    console.error('Error cargando formulas:', formulasError);
+    return;
+  }
+
+  const formulaIds = (formulasData || []).map((f) => f.id);
+  let componentesData = [];
+
+  if (formulaIds.length) {
+    const { data: compData, error: compError } = await supabaseClient
+      .from('formula_componentes')
+      .select('*')
+      .in('formula_id', formulaIds);
+
+    if (compError) {
+      console.error('Error cargando componentes de formulas:', compError);
+    } else {
+      componentesData = compData;
+    }
+  }
+
+  state.formulas = (formulasData || []).map((formula) => {
+    const ingredientes = componentesData
+      .filter((c) => String(c.formula_id) === String(formula.id))
+      .map((c) => {
+        const materia = materiaMap.get(String(c.materia_prima_id));
+        return {
+          id: c.id,
+          formula_id: c.formula_id,
+          materia_prima_id: c.materia_prima_id,
+          nombre: materia?.nombre || `Materia #${c.materia_prima_id}`,
+          cantidad: Number(c.cantidad) || 0,
+          unidad: c.unidad || materia?.unidad_base || '',
+          observaciones: c.observaciones || '',
+          costo_unitario: materia ? Number(materia.costo_unitario) || 0 : null
+        };
+      });
+
+    const costoEstimado = calcFormulaCost(ingredientes, materiaMap);
+
+    return {
+      id: formula.id,
+      nombre: formula.nombre,
+      forma: formula.forma || formula.forma_farmaceutica || '',
+      presentacion: formula.presentacion || formula.presentacion_estandar || '',
+      ingredientes,
+      costoEstimado,
+      createdAt: formula.created_at ? new Date(formula.created_at).getTime() : Date.now()
+    };
+  });
+
+  renderFormulaList(formulaSearch?.value || '');
+  refreshFormulaOptions();
+
+  if (form && formulaInput && (!costoInput?.value || costoInput.value === '0')) {
+    autofillCostoDesdeFormula(formulaInput.value);
+  }
+}
 async function init() {
   await cargarPreparados();
+  await renderStockDesdeSupabase();
+
   if (form && listContainer && searchInput) {
     renderList();
     form.addEventListener('submit', handleSubmit);
     searchInput.addEventListener('input', handleSearch);
+    const handleFormulaInput = () => autofillCostoDesdeFormula(formulaInput?.value);
+    formulaInput?.addEventListener('input', handleFormulaInput);
+    formulaInput?.addEventListener('change', handleFormulaInput);
     costoInput?.addEventListener('input', updatePrecioFinalUI);
     recargoInput?.addEventListener('input', updatePrecioFinalUI);
     updatePrecioFinalUI();
   }
 
   if (stockForm && stockList && stockSearch) {
-    await renderStockDesdeSupabase();
     stockForm.addEventListener('submit', handleStockSubmit);
     stockSearch.addEventListener('input', handleStockSearch);
     stockEditForm?.addEventListener('submit', handleStockEditSubmit);
@@ -982,8 +1356,8 @@ async function init() {
   }
 
   if (formulaForm && formulaList && ingredientsContainer) {
+    await loadFormulasDesdeSupabase();
     resetFormulaForm();
-    renderFormulaList();
     formulaForm.addEventListener('submit', handleFormulaSubmit);
     addIngredientBtn?.addEventListener('click', handleAddIngredient);
     formulaSearch?.addEventListener('input', handleFormulaSearch);
@@ -996,7 +1370,6 @@ async function init() {
 }
 
 init();
-renderStockDesdeSupabase();
 
 
 async function renderStockDesdeSupabase() {
@@ -1012,6 +1385,7 @@ async function renderStockDesdeSupabase() {
 
   state.stockItems = data || [];
   renderStockList(stockSearch?.value || '');
+  refreshIngredientRowsOptions();
 }
 async function handleEditStock(id) {
   const item = state.stockItems.find((s) => String(s.id) === String(id));

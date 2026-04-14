@@ -172,15 +172,23 @@
           </label>
 
           <div class="ingredients-head">
-            <span>Ingredientes (nombre, cantidad por presentacion, unidad)</span>
-            <button type="button" class="btn ghost" id="addIngredientBtn">Agregar ingrediente</button>
+            <span>Componentes (materia prima, cantidad, unidad)</span>
+            <button type="button" class="btn ghost" id="addIngredientBtn">Agregar materia prima</button>
           </div>
           <div id="ingredientsContainer" class="ingredients-container" aria-live="polite"></div>
+
+          <div class="formula-cost">
+            <div>
+              <p class="label">Costo estimado</p>
+              <p id="formulaCostLabel" class="formula-cost-value">$0.00</p>
+            </div>
+            <p class="muted">Se calcula con el costo unitario actual de cada materia prima.</p>
+          </div>
 
           <div class="form-actions">
             <button type="submit" class="btn primary" id="formulaSubmitBtn">Guardar formula</button>
             <button type="button" class="btn ghost" id="formulaResetBtn">Limpiar</button>
-            <p class="hint">La formula se almacena en memoria para uso interno.</p>
+            <p class="hint">Las formulas y sus componentes se guardan en Supabase.</p>
           </div>
         </form>
 
@@ -235,6 +243,9 @@
             <label>Cantidad
               <input type="number" name="stockCantidad" min="0.01" step="0.01" placeholder="Ej. 250" required>
             </label>
+            <label>Stock mínimo
+              <input type="number" name="stockMinimo" min="0" step="0.01" placeholder="Ej. 50" required>
+            </label>
           </div>
           <div class="form-row">
             <label>Unidad
@@ -249,6 +260,11 @@
             </label>
             <label>Fecha de vencimiento
               <input type="date" name="fechaVenc" required>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Costo unitario
+              <input type="number" name="costoUnitario" min="0" step="0.01" placeholder="Ej. 120.50" required>
             </label>
           </div>
           <label>Proveedor

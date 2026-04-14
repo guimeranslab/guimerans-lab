@@ -584,7 +584,7 @@ label {
 }
 .ingredient-row {
   display: grid;
-  grid-template-columns: 1.2fr 0.7fr 0.7fr auto;
+  grid-template-columns: 1.4fr 0.7fr 0.7fr 1fr auto;
   gap: 10px;
   align-items: center;
   background: var(--gray-25);
@@ -605,6 +605,23 @@ label {
 .remove-ingredient:hover {
   border-color: var(--blue);
   color: var(--blue);
+}
+
+.formula-cost {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--gray-25);
+  border: 1px dashed var(--gray-200);
+  border-radius: 12px;
+}
+.formula-cost-value {
+  margin: 4px 0 0 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--navy);
 }
 
 .empty-state {
