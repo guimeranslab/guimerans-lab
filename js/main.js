@@ -60,6 +60,41 @@ function isExpiringSoon(dateStr, daysWindow = 7) {
   return days <= daysWindow;
 }
 
+// ---- Helpers especificos de stock ----
+
+function parseDateSafe(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return isNaN(date.getTime()) ? null : date;
+}
+
+function isStockExpired(dateStr) {
+  const date = parseDateSafe(dateStr);
+  if (!date) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  date.setHours(0, 0, 0, 0);
+  return date < today;
+}
+
+function isStockExpiringSoon(dateStr, daysWindow = 30) {
+  const date = parseDateSafe(dateStr);
+  if (!date) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const limit = new Date(today);
+  limit.setDate(limit.getDate() + daysWindow);
+  date.setHours(0, 0, 0, 0);
+  return date >= today && date <= limit;
+}
+
+function isStockBelowMinimum(item) {
+  const actual = Number(item.stock_actual);
+  const minimo = Number(item.stock_minimo);
+  if (isNaN(actual) || isNaN(minimo)) return false;
+  return actual <= minimo;
+}
+
 /** Heuristica simple para marcar stock bajo segun unidad */
 function isLowStock(item) {
   const thresholds = { Unidades: 10, Gramos: 200, Mililitros: 200 };
@@ -284,19 +319,42 @@ function renderStockList(filter = '') {
     return;
   }
 
-  
-stockList.innerHTML = filtered.map(item => `
-  <div class="stock-item">
-    <strong>${item.nombre}</strong><br>
-    Cantidad: ${item.stock_actual} ${item.unidad_base}<br>
-    Lote: ${item.lote || '-'}<br>
-    Proveedor: ${item.proveedor || '-'}<br>
-    Vence: ${item.fecha_vencimiento || '-'}<br>
-    <button type="button" class="edit-stock-btn" data-id="${item.id}">Editar</button>
-    <button type="button" class="delete-stock-btn" data-id="${item.id}">Eliminar</button>
-    <hr>
-  </div>
-`).join('');
+  stockList.innerHTML = filtered.map(item => {
+    const lowStock = isStockBelowMinimum(item);
+    const expired = isStockExpired(item.fecha_vencimiento);
+    const expiringSoon = !expired && isStockExpiringSoon(item.fecha_vencimiento, 30);
+
+    const alerts = [];
+    if (lowStock) alerts.push('<span class="stock-flag stock-flag-low">Stock bajo</span>');
+    if (expired) {
+      alerts.push('<span class="stock-flag stock-flag-expired">Vencido</span>');
+    } else if (expiringSoon) {
+      alerts.push('<span class="stock-flag stock-flag-soon">Próximo a vencer</span>');
+    }
+
+    const alertsBlock = alerts.length ? `<div class="stock-alerts">${alerts.join('')}</div>` : '';
+
+    return `
+      <article class="stock-card">
+        <div class="row">
+          <div>
+            <div class="stock-title">${item.nombre}</div>
+            <div class="stock-meta">Lote: ${item.lote || '-'}</div>
+          </div>
+          <div class="stock-actions">
+            <button type="button" class="btn ghost edit-stock-btn" data-id="${item.id}">Editar</button>
+            <button type="button" class="btn ghost delete-stock-btn" data-id="${item.id}">Eliminar</button>
+          </div>
+        </div>
+        <div class="row stock-row">
+          <span class="stock-meta">Cantidad: <strong>${item.stock_actual} ${item.unidad_base}</strong></span>
+          <span class="stock-meta">Proveedor: ${item.proveedor || '-'}</span>
+          <span class="stock-meta">Vence: ${item.fecha_vencimiento || '-'}</span>
+        </div>
+        ${alertsBlock}
+      </article>
+    `;
+  }).join('');
 
   const deleteButtons = stockList.querySelectorAll('.delete-stock-btn');
   const editButtons = stockList.querySelectorAll('.edit-stock-btn');

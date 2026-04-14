@@ -468,6 +468,9 @@ label {
   gap: 12px;
   justify-content: space-between;
 }
+.stock-title { font-weight: 700; color: var(--navy); }
+.stock-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.stock-row { align-items: center; }
 .formula-card .row {
   display: flex;
   flex-wrap: wrap;
@@ -477,6 +480,33 @@ label {
 .stock-meta { color: var(--gray-500); font-size: 13px; }
 .formula-meta { color: var(--gray-500); font-size: 13px; }
 .alert-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.stock-alerts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.stock-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+.stock-flag-low {
+  background: rgba(194, 59, 59, 0.12);
+  color: #b33232;
+  border-color: rgba(194, 59, 59, 0.32);
+}
+.stock-flag-soon {
+  background: rgba(216, 155, 43, 0.14);
+  color: #a26b14;
+  border-color: rgba(216, 155, 43, 0.32);
+}
+.stock-flag-expired {
+  background: rgba(194, 59, 59, 0.18);
+  color: #7f1c1c;
+  border-color: rgba(194, 59, 59, 0.44);
+  box-shadow: inset 0 0 0 1px rgba(194, 59, 59, 0.08);
+}
 
 .import-controls {
   display: grid;
