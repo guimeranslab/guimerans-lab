@@ -28,6 +28,10 @@ const formulaSubmitBtn = document.getElementById('formulaSubmitBtn');
 const importBtn = document.getElementById('importBtn');
 const importInput = document.getElementById('importInput');
 const importSummary = document.getElementById('importSummary');
+const stockEditModal = document.getElementById('stockEditModal');
+const stockEditForm = document.getElementById('stockEditForm');
+const stockEditCloseBtn = stockEditModal?.querySelector('.modal-close');
+const stockEditCancelBtn = stockEditModal?.querySelector('.modal-cancel');
 const costoInput = form?.querySelector('input[name="costo"]');
 const recargoInput = form?.querySelector('input[name="recargo"]');
 const precioFinalInput = form?.querySelector('input[name="precioFinal"]');
@@ -93,6 +97,24 @@ function isStockBelowMinimum(item) {
   const minimo = Number(item.stock_minimo);
   if (isNaN(actual) || isNaN(minimo)) return false;
   return actual <= minimo;
+}
+
+function openStockEditModal(item) {
+  if (!stockEditModal || !stockEditForm) return;
+  stockEditModal.classList.remove('hidden');
+  stockEditForm.stockId.value = item.id;
+  stockEditForm.stock_actual.value = item.stock_actual ?? '';
+  stockEditForm.stock_minimo.value = item.stock_minimo ?? '';
+  stockEditForm.costo_unitario.value = item.costo_unitario ?? '';
+  stockEditForm.lote.value = item.lote ?? '';
+  stockEditForm.proveedor.value = item.proveedor ?? '';
+  stockEditForm.fecha_vencimiento.value = item.fecha_vencimiento ? new Date(item.fecha_vencimiento).toISOString().slice(0, 10) : '';
+}
+
+function closeStockEditModal() {
+  if (!stockEditModal || !stockEditForm) return;
+  stockEditModal.classList.add('hidden');
+  stockEditForm.reset();
 }
 
 /** Heuristica simple para marcar stock bajo segun unidad */
@@ -680,6 +702,38 @@ async function handleStockSubmit(event) {
   stockForm.reset();
   await renderStockDesdeSupabase();
 }
+
+async function handleStockEditSubmit(event) {
+  event.preventDefault();
+  if (!stockEditForm) return;
+
+  const formData = new FormData(stockEditForm);
+  const id = formData.get('stockId');
+  const payload = {
+    stock_actual: parseFloat(formData.get('stock_actual')) || 0,
+    stock_minimo: parseFloat(formData.get('stock_minimo')) || 0,
+    costo_unitario: formData.get('costo_unitario') === '' ? null : parseFloat(formData.get('costo_unitario')),
+    lote: (formData.get('lote') || '').trim(),
+    proveedor: (formData.get('proveedor') || '').trim(),
+    fecha_vencimiento: formData.get('fecha_vencimiento') || null
+  };
+
+  const { error } = await supabaseClient
+    .from('materias_primas')
+    .update(payload)
+    .eq('id', id);
+
+  if (error) {
+    console.error('Error al actualizar:', error);
+    alert('No se pudo actualizar el stock.');
+    return;
+  }
+
+  closeStockEditModal();
+  await renderStockDesdeSupabase();
+  alert('Stock actualizado.');
+}
+
 async function handleDeleteStock(id) {
   const confirmar = confirm("¿Eliminar esta materia prima?");
   if (!confirmar) return;
@@ -919,6 +973,12 @@ async function init() {
     await renderStockDesdeSupabase();
     stockForm.addEventListener('submit', handleStockSubmit);
     stockSearch.addEventListener('input', handleStockSearch);
+    stockEditForm?.addEventListener('submit', handleStockEditSubmit);
+    stockEditCloseBtn?.addEventListener('click', closeStockEditModal);
+    stockEditCancelBtn?.addEventListener('click', closeStockEditModal);
+    stockEditModal?.addEventListener('click', (event) => {
+      if (event.target.classList.contains('modal-backdrop')) closeStockEditModal();
+    });
   }
 
   if (formulaForm && formulaList && ingredientsContainer) {
@@ -954,29 +1014,11 @@ async function renderStockDesdeSupabase() {
   renderStockList(stockSearch?.value || '');
 }
 async function handleEditStock(id) {
-  const nuevoStock = prompt("Nueva cantidad:");
-
-  if (nuevoStock === null) return;
-
-  const cantidad = parseFloat(nuevoStock);
-
-  if (isNaN(cantidad)) {
-    alert("Cantidad inválida");
+  const item = state.stockItems.find((s) => String(s.id) === String(id));
+  if (!item) {
+    alert('Item de stock no encontrado.');
     return;
   }
-
-  const { error } = await supabaseClient
-    .from("materias_primas")
-    .update({ stock_actual: cantidad })
-    .eq("id", id);
-
-  if (error) {
-    console.error(error);
-    alert("Error al actualizar");
-    return;
-  }
-
-  alert("Stock actualizado");
-
-  await renderStockDesdeSupabase();
+  openStockEditModal(item);
 }
+

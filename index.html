@@ -277,6 +277,48 @@
       </div>
     </section>
 
+    <!-- Modal simple para editar stock -->
+    <div id="stockEditModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="stockEditTitle">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="stockEditTitle">Editar stock</h3>
+          <button type="button" class="modal-close" aria-label="Cerrar edición">&times;</button>
+        </div>
+        <form id="stockEditForm" class="modal-form">
+          <input type="hidden" name="stockId">
+          <div class="form-row">
+            <label>Cantidad actual
+              <input type="number" name="stock_actual" min="0" step="0.01" required>
+            </label>
+            <label>Stock mínimo
+              <input type="number" name="stock_minimo" min="0" step="0.01" required>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Costo unitario
+              <input type="number" name="costo_unitario" min="0" step="0.01">
+            </label>
+            <label>Lote
+              <input type="text" name="lote" placeholder="Identificador de lote">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Proveedor
+              <input type="text" name="proveedor" placeholder="Empresa proveedora">
+            </label>
+            <label>Fecha de vencimiento
+              <input type="date" name="fecha_vencimiento">
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn ghost modal-cancel">Cancelar</button>
+            <button type="submit" class="btn primary">Guardar cambios</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <!-- Seccion de reportes -->
     <section id="reportes" class="section">
       <div class="section-head">
