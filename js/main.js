@@ -34,11 +34,17 @@ const stockEditForm = document.getElementById('stockEditForm');
 const stockEditCloseBtn = stockEditModal?.querySelector('.modal-close');
 const stockEditCancelBtn = stockEditModal?.querySelector('.modal-cancel');
 const formulaInput = form?.querySelector('input[name="formula"]');
+const cantidadInput = form?.querySelector('input[name="cantidad"]');
+const unidadMedidaInput = form?.querySelector('select[name="unidadMedida"]');
 const costoInput = form?.querySelector('input[name="costo"]');
 const recargoInput = form?.querySelector('input[name="recargo"]');
 const precioFinalInput = form?.querySelector('input[name="precioFinal"]');
 
 let editingFormulaId = null;
+let selectedPrepFormulaBase = null;
+const STOCK_IMPACT_STATUSES = new Set(['Listo', 'Entregado']);
+const MOVIMIENTO_STOCK_CONSUMO = 'consumo_preparado';
+const MOVIMIENTO_STOCK_REVERSION = 'reversion_preparado';
 
 // ---- Helpers de datos ----
 
@@ -55,6 +61,112 @@ function formatCantidad(item) {
 function calcPrecioFinal(costo, recargo) {
   if (isNaN(costo) || isNaN(recargo) || costo < 0 || recargo < 0) return null;
   return costo + (costo * recargo / 100);
+}
+
+function normalizeText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function parseNumberFlexible(value) {
+  const raw = String(value || '').trim().replace(/\s+/g, '');
+  if (!raw) return NaN;
+
+  if (raw.includes(',') && raw.includes('.')) {
+    const commaPos = raw.lastIndexOf(',');
+    const dotPos = raw.lastIndexOf('.');
+    if (commaPos > dotPos) {
+      return Number(raw.replace(/\./g, '').replace(',', '.'));
+    }
+    return Number(raw.replace(/,/g, ''));
+  }
+
+  if (raw.includes(',')) return Number(raw.replace(',', '.'));
+  return Number(raw);
+}
+
+function normalizePrepUnit(unit) {
+  const normalized = normalizeText(unit).replace(/\./g, '');
+  if (!normalized) return null;
+
+  if (/^(unidad|unidades|u|und|capsula|capsulas|caps)$/.test(normalized)) return 'Unidades';
+  if (/^(g|gr|grs|gramo|gramos)$/.test(normalized)) return 'Gramos';
+  if (/^(ml|mililitro|mililitros|cc)$/.test(normalized)) return 'Mililitros';
+  return null;
+}
+
+/** Extrae cantidad y unidad base desde una presentacion textual (ej: "30 capsulas", "100 g", "50 ml") */
+function parsePresentacionEstandar(presentacion) {
+  const normalized = normalizeText(presentacion);
+  if (!normalized) return null;
+
+  const match = normalized.match(/(\d+(?:[.,]\d+)?)\s*([a-z]+)/);
+  if (!match) return null;
+
+  const cantidadBase = parseNumberFlexible(match[1]);
+  const unidadBase = normalizePrepUnit(match[2]);
+
+  if (!Number.isFinite(cantidadBase) || cantidadBase <= 0 || !unidadBase) return null;
+  return { cantidadBase, unidadBase };
+}
+
+function setSelectedPrepFormulaBase(formulaNombre) {
+  const target = String(formulaNombre || '').trim();
+  if (!target) {
+    selectedPrepFormulaBase = null;
+    return;
+  }
+
+  const formula = findFormulaByName(target);
+  if (!formula) {
+    selectedPrepFormulaBase = null;
+    return;
+  }
+
+  const parsedBase = parsePresentacionEstandar(formula.presentacion || formula.presentacion_estandar || '');
+  const costoBase = Number(formula.costoEstimado);
+
+  selectedPrepFormulaBase = {
+    formulaId: formula.id,
+    formulaNombre: formula.nombre || target,
+    cantidadBase: parsedBase?.cantidadBase ?? null,
+    unidadBase: parsedBase?.unidadBase ?? null,
+    costoBase: Number.isFinite(costoBase) && costoBase >= 0 ? costoBase : null
+  };
+}
+
+function calcCostoProporcional(cantidadSolicitada, unidadSolicitada, formulaBase) {
+  if (!formulaBase) return 0;
+
+  const cantidad = Number(cantidadSolicitada);
+  if (!Number.isFinite(cantidad) || cantidad < 0) return 0;
+
+  if (!Number.isFinite(formulaBase.costoBase) || formulaBase.costoBase < 0) return 0;
+  if (!Number.isFinite(formulaBase.cantidadBase) || formulaBase.cantidadBase <= 0 || !formulaBase.unidadBase) return 0;
+
+  const unidadSolicitadaNormalizada = normalizePrepUnit(unidadSolicitada);
+  if (unidadSolicitadaNormalizada && unidadSolicitadaNormalizada !== formulaBase.unidadBase) return 0;
+
+  const factor = cantidad / formulaBase.cantidadBase;
+  if (!Number.isFinite(factor) || factor < 0) return 0;
+
+  const costo = formulaBase.costoBase * factor;
+  return Number.isFinite(costo) && costo >= 0 ? costo : 0;
+}
+
+function updateCostoProporcionalUI() {
+  if (!costoInput) return;
+  const costoCalculado = calcCostoProporcional(
+    Number(cantidadInput?.value),
+    unidadMedidaInput?.value,
+    selectedPrepFormulaBase
+  );
+
+  costoInput.value = costoCalculado.toFixed(2);
+  updatePrecioFinalUI();
 }
 
 /** Calcula si un item de stock tiene alerta de vencimiento proximo (default 7 dias) */
@@ -101,16 +213,49 @@ function isStockBelowMinimum(item) {
   return actual <= minimo;
 }
 
+function getStockFieldValue(item, ...keys) {
+  if (!item) return '';
+  const foundKey = keys.find((key) => item[key] !== undefined && item[key] !== null);
+  return foundKey ? item[foundKey] : '';
+}
+
+function normalizeDateForInput(value) {
+  if (!value) return '';
+  const raw = String(value).trim();
+  if (!raw) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const parsed = new Date(raw);
+  if (isNaN(parsed.getTime())) return '';
+  return parsed.toISOString().slice(0, 10);
+}
+
+function setStockEditFieldValue(fieldName, value) {
+  if (!stockEditForm) return;
+  const field = stockEditForm.elements.namedItem(fieldName);
+  if (!field || !('value' in field)) return;
+  field.value = value ?? '';
+}
+
 function openStockEditModal(item) {
   if (!stockEditModal || !stockEditForm) return;
+
+  const stockId = getStockFieldValue(item, 'id');
+  const stockActual = getStockFieldValue(item, 'stock_actual', 'stockActual');
+  const stockMinimo = getStockFieldValue(item, 'stock_minimo', 'stockMinimo');
+  const costoUnitario = getStockFieldValue(item, 'costo_unitario', 'costoUnitario');
+  const lote = getStockFieldValue(item, 'lote');
+  const proveedor = getStockFieldValue(item, 'proveedor');
+  const fechaVencimiento = getStockFieldValue(item, 'fecha_vencimiento', 'fechaVencimiento');
+
+  setStockEditFieldValue('stockId', stockId);
+  setStockEditFieldValue('stock_actual', stockActual);
+  setStockEditFieldValue('stock_minimo', stockMinimo);
+  setStockEditFieldValue('costo_unitario', costoUnitario);
+  setStockEditFieldValue('lote', lote);
+  setStockEditFieldValue('proveedor', proveedor);
+  setStockEditFieldValue('fecha_vencimiento', normalizeDateForInput(fechaVencimiento));
+
   stockEditModal.classList.remove('hidden');
-  stockEditForm.stockId.value = item.id;
-  stockEditForm.stock_actual.value = item.stock_actual ?? '';
-  stockEditForm.stock_minimo.value = item.stock_minimo ?? '';
-  stockEditForm.costo_unitario.value = item.costo_unitario ?? '';
-  stockEditForm.lote.value = item.lote ?? '';
-  stockEditForm.proveedor.value = item.proveedor ?? '';
-  stockEditForm.fecha_vencimiento.value = item.fecha_vencimiento ? new Date(item.fecha_vencimiento).toISOString().slice(0, 10) : '';
 }
 
 function closeStockEditModal() {
@@ -193,29 +338,103 @@ function refreshIngredientRowsOptions() {
   });
 }
 
+/** Cambia estado y ejecuta automatizacion de stock segun transicion */
+async function changePreparadoStatus(id, nextStatus) {
+  const item = state.items.find((p) => normalizeId(p.id) === normalizeId(id));
+  if (!item) return;
+  if (!STATUS_FLOW.includes(nextStatus)) return;
+  if (item.status === nextStatus) return;
+
+  const requiereAplicar = STOCK_IMPACT_STATUSES.has(nextStatus) && !Boolean(item.stockAplicado);
+  const requiereRevertir = !STOCK_IMPACT_STATUSES.has(nextStatus) && Boolean(item.stockAplicado);
+  let reversionEntries = [];
+  let aplicacionEntries = [];
+
+  if (requiereRevertir) {
+    const reversion = await revertStockForPreparado(item, {
+      motivo: `Reversion por cambio de estado ${item.status} -> ${nextStatus}`
+    });
+    if (!reversion.ok) {
+      alert(reversion.error || 'No se pudo devolver stock al volver a Pendiente.');
+      return;
+    }
+    reversionEntries = reversion.entries || [];
+  }
+
+  if (requiereAplicar) {
+    const aplicacion = await applyStockForPreparado(item, {
+      motivo: `Descuento por cambio de estado ${item.status} -> ${nextStatus}`
+    });
+    if (!aplicacion.ok) {
+      alert(aplicacion.error || 'No se pudo descontar stock en el cambio de estado.');
+      return;
+    }
+    aplicacionEntries = aplicacion.entries || [];
+  }
+
+  const stockAplicadoFinal = STOCK_IMPACT_STATUSES.has(nextStatus);
+  const { error } = await supabaseClient
+    .from('preparados')
+    .update({
+      estado: nextStatus,
+      stock_aplicado: stockAplicadoFinal
+    })
+    .eq('id', id);
+
+  if (error) {
+    console.error('Error actualizando estado en Supabase:', error);
+
+    if (requiereAplicar) {
+      if (aplicacionEntries.length) {
+        await processStockEntries({
+          preparado: item,
+          entries: aplicacionEntries,
+          tipoMovimiento: MOVIMIENTO_STOCK_REVERSION,
+          stockDeltaSign: 1,
+          motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`,
+          source: 'rollback'
+        });
+      } else {
+        await revertStockForPreparado(item, {
+          motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`
+        });
+      }
+    } else if (requiereRevertir) {
+      if (reversionEntries.length) {
+        await processStockEntries({
+          preparado: item,
+          entries: reversionEntries,
+          tipoMovimiento: MOVIMIENTO_STOCK_CONSUMO,
+          stockDeltaSign: -1,
+          motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`,
+          source: 'rollback'
+        });
+      } else {
+        await applyStockForPreparado(item, {
+          motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`
+        });
+      }
+    }
+
+    alert('No se pudo actualizar el estado.');
+    return;
+  }
+
+  item.status = nextStatus;
+  item.stockAplicado = stockAplicadoFinal;
+  renderList(searchInput?.value || '');
+}
+
 /** Avanza el estado de un preparado respetando el flujo definido */
 async function advanceStatus(id) {
-  const item = state.items.find((p) => p.id === id);
+  const item = state.items.find((p) => normalizeId(p.id) === normalizeId(id));
   if (!item) return;
 
   const currentIndex = STATUS_FLOW.indexOf(item.status);
   if (currentIndex >= STATUS_FLOW.length - 1) return;
 
   const nextStatus = STATUS_FLOW[currentIndex + 1];
-
-  const { error } = await supabaseClient
-    .from('preparados')
-    .update({ estado: nextStatus })
-    .eq('id', id);
-
-  if (error) {
-    console.error('Error actualizando estado en Supabase:', error);
-    alert('No se pudo actualizar el estado.');
-    return;
-  }
-
-  item.status = nextStatus;
-  renderList(searchInput.value);
+  await changePreparadoStatus(id, nextStatus);
 }
 
 /** Filtra por cualquier campo textual usando el termino ingresado */
@@ -275,22 +494,371 @@ function findFormulaByName(nombre) {
   return state.formulas.find((f) => f.nombre?.trim().toLowerCase() === normalized) || null;
 }
 
+/** Normaliza IDs para comparaciones seguras entre string y number */
+function normalizeId(value) {
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
+/** Devuelve una formula por id sin depender del tipo */
+function findFormulaById(id) {
+  const targetId = normalizeId(id);
+  if (!targetId) return null;
+  return state.formulas.find((f) => normalizeId(f.id) === targetId) || null;
+}
+
+function toPositiveStockAmount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return NaN;
+  return Number(Math.abs(parsed).toFixed(6));
+}
+
+function hasPreparedStockInputsChanged(previousItem, nextItem) {
+  if (!previousItem || !nextItem) return false;
+
+  const prevFormula = normalizeText(previousItem.formula);
+  const nextFormula = normalizeText(nextItem.formula);
+  if (prevFormula !== nextFormula) return true;
+
+  const prevCantidad = Number(previousItem.cantidad);
+  const nextCantidad = Number(nextItem.cantidad);
+  const prevCantidadNormalizada = Number.isFinite(prevCantidad) ? Number(prevCantidad.toFixed(6)) : NaN;
+  const nextCantidadNormalizada = Number.isFinite(nextCantidad) ? Number(nextCantidad.toFixed(6)) : NaN;
+  if (prevCantidadNormalizada !== nextCantidadNormalizada) return true;
+
+  const prevUnidad = normalizePrepUnit(previousItem.unidadMedida) || normalizeText(previousItem.unidadMedida);
+  const nextUnidad = normalizePrepUnit(nextItem.unidadMedida) || normalizeText(nextItem.unidadMedida);
+  return prevUnidad !== nextUnidad;
+}
+
+function calculateFormulaConsumptionForPreparado(preparado) {
+  if (!preparado) {
+    return { ok: false, error: 'No hay datos del preparado para calcular stock.' };
+  }
+
+  const formula = findFormulaByName(preparado.formula);
+  if (!formula) {
+    return { ok: false, error: `No se encontro la formula "${preparado.formula}" para calcular stock.` };
+  }
+
+  const presentacion = formula.presentacion || formula.presentacion_estandar || '';
+  const base = parsePresentacionEstandar(presentacion);
+  if (!base) {
+    return { ok: false, error: `La formula "${formula.nombre}" no tiene una presentacion estandar valida.` };
+  }
+
+  const cantidadPreparado = Number(preparado.cantidad);
+  if (!Number.isFinite(cantidadPreparado) || cantidadPreparado <= 0) {
+    return { ok: false, error: 'La cantidad del preparado no es valida para calcular consumo.' };
+  }
+
+  const unidadPreparado = normalizePrepUnit(preparado.unidadMedida);
+  if (!unidadPreparado) {
+    return { ok: false, error: 'La unidad del preparado no es valida para calcular consumo.' };
+  }
+
+  if (unidadPreparado !== base.unidadBase) {
+    return {
+      ok: false,
+      error: `La unidad del preparado (${preparado.unidadMedida}) no coincide con la presentacion base de la formula (${base.unidadBase}).`
+    };
+  }
+
+  const factor = cantidadPreparado / base.cantidadBase;
+  if (!Number.isFinite(factor) || factor <= 0) {
+    return { ok: false, error: 'No se pudo calcular factor proporcional para el consumo de stock.' };
+  }
+
+  const materiaMap = new Map(state.stockItems.map((m) => [normalizeId(m.id), m]));
+  const componentes = Array.isArray(formula.ingredientes) ? formula.ingredientes : [];
+  if (!componentes.length) {
+    return { ok: false, error: `La formula "${formula.nombre}" no tiene componentes cargados.` };
+  }
+
+  const entries = [];
+  for (const componente of componentes) {
+    const materiaId = normalizeId(componente.materia_prima_id);
+    const cantidadBase = Number(componente.cantidad);
+    if (!materiaId || !Number.isFinite(cantidadBase) || cantidadBase <= 0) {
+      return { ok: false, error: `La formula "${formula.nombre}" tiene componentes invalidos para stock.` };
+    }
+
+    const cantidadReal = toPositiveStockAmount(cantidadBase * factor);
+    if (!Number.isFinite(cantidadReal) || cantidadReal <= 0) continue;
+
+    const materia = materiaMap.get(materiaId);
+    const unidad = componente.unidad || materia?.unidad_base || '';
+
+    entries.push({
+      materia_prima_id: materiaId,
+      cantidad: cantidadReal,
+      unidad,
+      nombre_materia: materia?.nombre || componente.nombre || `Materia #${materiaId}`
+    });
+  }
+
+  if (!entries.length) {
+    return { ok: false, error: `No se pudo obtener consumo real para la formula "${formula.nombre}".` };
+  }
+
+  return { ok: true, entries, factor, formula };
+}
+
+async function fetchNetAppliedConsumptionFromMovements(preparadoId) {
+  const id = normalizeId(preparadoId);
+  if (!id) return { ok: true, entries: [] };
+
+  const { data, error } = await supabaseClient
+    .from('movimientos_stock')
+    .select('materia_prima_id, tipo_movimiento, cantidad, unidad')
+    .eq('preparado_id', id);
+
+  if (error) {
+    console.error('Error leyendo movimientos de stock:', error);
+    return { ok: false, error: 'No se pudo leer movimientos de stock para revertir.' };
+  }
+
+  const materiaMap = new Map(state.stockItems.map((m) => [normalizeId(m.id), m]));
+  const balance = new Map();
+
+  for (const movimiento of data || []) {
+    const materiaId = normalizeId(movimiento.materia_prima_id);
+    if (!materiaId) continue;
+
+    const cantidad = toPositiveStockAmount(movimiento.cantidad);
+    if (!Number.isFinite(cantidad) || cantidad <= 0) continue;
+
+    const tipo = String(movimiento.tipo_movimiento || '').trim();
+    const signo = tipo === MOVIMIENTO_STOCK_CONSUMO ? 1 : tipo === MOVIMIENTO_STOCK_REVERSION ? -1 : 0;
+    if (!signo) continue;
+
+    const current = balance.get(materiaId) || {
+      materia_prima_id: materiaId,
+      cantidad: 0,
+      unidad: movimiento.unidad || materiaMap.get(materiaId)?.unidad_base || '',
+      nombre_materia: materiaMap.get(materiaId)?.nombre || `Materia #${materiaId}`
+    };
+
+    current.cantidad += signo * cantidad;
+    if (!current.unidad) {
+      current.unidad = movimiento.unidad || materiaMap.get(materiaId)?.unidad_base || '';
+    }
+    balance.set(materiaId, current);
+  }
+
+  const entries = Array.from(balance.values())
+    .filter((entry) => entry.cantidad > 0)
+    .map((entry) => ({
+      ...entry,
+      cantidad: Number(entry.cantidad.toFixed(6))
+    }));
+
+  return { ok: true, entries };
+}
+
+async function resolveConsumptionForReversion(preparado) {
+  const fromMovimientos = await fetchNetAppliedConsumptionFromMovements(preparado?.id);
+  if (!fromMovimientos.ok) return fromMovimientos;
+  if (fromMovimientos.entries.length) {
+    return {
+      ok: true,
+      entries: fromMovimientos.entries,
+      source: 'movimientos'
+    };
+  }
+
+  const fromFormula = calculateFormulaConsumptionForPreparado(preparado);
+  if (!fromFormula.ok) return fromFormula;
+
+  return {
+    ok: true,
+    entries: fromFormula.entries,
+    source: 'formula',
+    factor: fromFormula.factor
+  };
+}
+
+async function rollbackMateriaStocks(snapshotMap) {
+  if (!(snapshotMap instanceof Map) || !snapshotMap.size) return;
+
+  for (const [materiaId, stockAnterior] of snapshotMap.entries()) {
+    const { error } = await supabaseClient
+      .from('materias_primas')
+      .update({ stock_actual: stockAnterior })
+      .eq('id', materiaId);
+
+    if (error) {
+      console.error(`Error revirtiendo stock de materia prima ${materiaId}:`, error);
+    }
+  }
+}
+
+function applyLocalMateriaStocks(nextStocksById) {
+  if (!(nextStocksById instanceof Map) || !nextStocksById.size) return;
+
+  state.stockItems = state.stockItems.map((item) => {
+    const materiaId = normalizeId(item.id);
+    if (!nextStocksById.has(materiaId)) return item;
+    return {
+      ...item,
+      stock_actual: nextStocksById.get(materiaId)
+    };
+  });
+
+  renderStockList(stockSearch?.value || '');
+  refreshIngredientRowsOptions();
+}
+
+async function processStockEntries({
+  preparado,
+  entries,
+  tipoMovimiento,
+  stockDeltaSign,
+  motivo,
+  source,
+  factor
+}) {
+  const preparadoId = normalizeId(preparado?.id);
+  if (!preparadoId) {
+    return { ok: false, error: 'El preparado no tiene ID valido para registrar movimientos de stock.' };
+  }
+
+  const cleanEntries = (entries || [])
+    .map((entry) => {
+      const materiaId = normalizeId(entry.materia_prima_id);
+      const cantidad = toPositiveStockAmount(entry.cantidad);
+      if (!materiaId || !Number.isFinite(cantidad) || cantidad <= 0) return null;
+      return {
+        materia_prima_id: materiaId,
+        cantidad,
+        unidad: entry.unidad || '',
+        nombre_materia: entry.nombre_materia || ''
+      };
+    })
+    .filter(Boolean);
+
+  if (!cleanEntries.length) return { ok: true, entries: [] };
+
+  const materiaMap = await getMateriaMapFresh();
+  const totalPorMateria = new Map();
+
+  for (const entry of cleanEntries) {
+    const current = totalPorMateria.get(entry.materia_prima_id) || 0;
+    totalPorMateria.set(entry.materia_prima_id, Number((current + entry.cantidad).toFixed(6)));
+  }
+
+  const updates = [];
+  for (const [materiaId, cantidadTotal] of totalPorMateria.entries()) {
+    const materia = materiaMap.get(materiaId);
+    if (!materia) {
+      return { ok: false, error: `No se encontro la materia prima #${materiaId} para impactar stock.` };
+    }
+
+    const stockActual = Number(materia.stock_actual) || 0;
+    const stockNuevo = Number((stockActual + (stockDeltaSign * cantidadTotal)).toFixed(6));
+    updates.push({ materiaId, stockActual, stockNuevo });
+  }
+
+  const snapshotMap = new Map();
+  const nextStocksById = new Map();
+
+  for (const update of updates) {
+    snapshotMap.set(update.materiaId, update.stockActual);
+    const { error } = await supabaseClient
+      .from('materias_primas')
+      .update({ stock_actual: update.stockNuevo })
+      .eq('id', update.materiaId);
+
+    if (error) {
+      console.error('Error actualizando stock de materias primas:', error);
+      await rollbackMateriaStocks(snapshotMap);
+      return { ok: false, error: 'No se pudo actualizar stock de materias primas.' };
+    }
+
+    nextStocksById.set(update.materiaId, update.stockNuevo);
+  }
+
+  const observacionBase = [
+    motivo || '',
+    `Preparado #${preparadoId}`,
+    preparado?.formula ? `Formula: ${preparado.formula}` : '',
+    source ? `Fuente: ${source}` : '',
+    Number.isFinite(factor) ? `Factor: ${Number(factor).toFixed(6)}` : ''
+  ]
+    .filter(Boolean)
+    .join(' | ');
+
+  const movimientosPayload = cleanEntries.map((entry) => {
+    const materia = materiaMap.get(entry.materia_prima_id);
+    const unidad = entry.unidad || materia?.unidad_base || '';
+    const detalleMateria = entry.nombre_materia || materia?.nombre || '';
+
+    return {
+      materia_prima_id: entry.materia_prima_id,
+      preparado_id: preparadoId,
+      tipo_movimiento: tipoMovimiento,
+      cantidad: entry.cantidad,
+      unidad,
+      observaciones: [observacionBase, detalleMateria ? `Materia: ${detalleMateria}` : '']
+        .filter(Boolean)
+        .join(' | ')
+    };
+  });
+
+  if (movimientosPayload.length) {
+    const { error: movimientosError } = await supabaseClient
+      .from('movimientos_stock')
+      .insert(movimientosPayload);
+
+    if (movimientosError) {
+      console.error('Error registrando movimientos de stock:', movimientosError);
+      await rollbackMateriaStocks(snapshotMap);
+      return { ok: false, error: 'No se pudo registrar movimientos de stock.' };
+    }
+  }
+
+  applyLocalMateriaStocks(nextStocksById);
+  return { ok: true, entries: cleanEntries };
+}
+
+async function applyStockForPreparado(preparado, options = {}) {
+  const consumption = calculateFormulaConsumptionForPreparado(preparado);
+  if (!consumption.ok) return consumption;
+
+  return processStockEntries({
+    preparado,
+    entries: consumption.entries,
+    tipoMovimiento: MOVIMIENTO_STOCK_CONSUMO,
+    stockDeltaSign: -1,
+    motivo: options.motivo || 'Descuento automatico de stock',
+    source: 'formula',
+    factor: consumption.factor
+  });
+}
+
+async function revertStockForPreparado(preparado, options = {}) {
+  const consumption = await resolveConsumptionForReversion(preparado);
+  if (!consumption.ok) return consumption;
+
+  return processStockEntries({
+    preparado,
+    entries: consumption.entries,
+    tipoMovimiento: MOVIMIENTO_STOCK_REVERSION,
+    stockDeltaSign: 1,
+    motivo: options.motivo || 'Reversion automatica de stock',
+    source: consumption.source || 'formula',
+    factor: consumption.factor
+  });
+}
+
 /** Completa el campo costo segun el costo estimado de la formula elegida */
 function autofillCostoDesdeFormula(nombre) {
   if (!costoInput) return;
-  const target = nombre?.trim();
-  if (!target) {
-    costoInput.value = '';
-    updatePrecioFinalUI();
-    return;
+  setSelectedPrepFormulaBase(nombre);
+  if (selectedPrepFormulaBase?.unidadBase && unidadMedidaInput) {
+    unidadMedidaInput.value = selectedPrepFormulaBase.unidadBase;
   }
-
-  const formula = findFormulaByName(target);
-  if (!formula) return;
-
-  const costo = Number(formula.costoEstimado);
-  costoInput.value = isNaN(costo) ? '0' : costo.toFixed(2);
-  updatePrecioFinalUI();
+  updateCostoProporcionalUI();
 }
 
 /** Recalcula costo estimado y lo muestra en el formulario */
@@ -357,6 +925,7 @@ function renderList(term = '') {
 
   <div class="actions">
     <button class="btn ghost" data-action="advance" ${item.status === 'Entregado' ? 'disabled' : ''}>${nextLabel}</button>
+    ${item.status !== 'Pendiente' ? '<button class="btn ghost" data-action="to-pending">Volver a Pendiente</button>' : ''}
     <button class="btn ghost" data-action="edit">Editar</button>
     <button class="btn ghost" data-action="delete">Eliminar</button>
   </div>
@@ -371,6 +940,11 @@ if (advanceBtn) {
 const editBtn = card.querySelector('[data-action="edit"]');
 if (editBtn) {
   editBtn.addEventListener('click', () => editPreparado(item.id));
+}
+
+const toPendingBtn = card.querySelector('[data-action="to-pending"]');
+if (toPendingBtn) {
+  toPendingBtn.addEventListener('click', () => changePreparadoStatus(item.id, 'Pendiente'));
 }
 
 const deleteBtn = card.querySelector('[data-action="delete"]');
@@ -394,16 +968,33 @@ if (deleteBtn) {
   form.fechaCarga.value = item.fechaCarga || '';
   form.diaEntrega.value = item.diaEntrega || '';
   form.observaciones.value = item.observaciones || '';
-  form.costo.value = item.costo ?? '';
   form.recargo.value = item.recargo ?? '';
-
-  updatePrecioFinalUI();
+  autofillCostoDesdeFormula(form.formula.value);
 
   form.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
-}async function deletePreparado(id) {
-  const confirmar = confirm('¿Querés eliminar este preparado?');
+}
+
+async function deletePreparado(id) {
+  const item = state.items.find((prep) => normalizeId(prep.id) === normalizeId(id));
+  const confirmar = confirm('Quieres eliminar este preparado?');
   if (!confirmar) return;
+
+  let reversionAplicada = false;
+  let reversionEntries = [];
+  if (item?.stockAplicado) {
+    const reversion = await revertStockForPreparado(item, {
+      motivo: 'Reversion por eliminacion de preparado'
+    });
+
+    if (!reversion.ok) {
+      alert(reversion.error || 'No se pudo devolver stock antes de eliminar el preparado.');
+      return;
+    }
+
+    reversionAplicada = true;
+    reversionEntries = reversion.entries || [];
+  }
 
   const { error } = await supabaseClient
     .from('preparados')
@@ -412,16 +1003,34 @@ if (deleteBtn) {
 
   if (error) {
     console.error('Error eliminando en Supabase:', error);
+
+    if (reversionAplicada && item) {
+      if (reversionEntries.length) {
+        await processStockEntries({
+          preparado: item,
+          entries: reversionEntries,
+          tipoMovimiento: MOVIMIENTO_STOCK_CONSUMO,
+          stockDeltaSign: -1,
+          motivo: 'Rollback por fallo al eliminar preparado',
+          source: 'rollback'
+        });
+      } else {
+        await applyStockForPreparado(item, {
+          motivo: 'Rollback por fallo al eliminar preparado'
+        });
+      }
+    }
+
     alert('No se pudo eliminar el preparado.');
     return;
   }
 
-  state.items = state.items.filter(item => item.id !== id);
-  renderList(searchInput.value);
+  state.items = state.items.filter((prep) => normalizeId(prep.id) !== normalizeId(id));
+  renderList(searchInput?.value || '');
   alert('Preparado eliminado correctamente.');
 }
 
-/** Renderiza la lista de stock aplicando filtro y marcando alertas */
+
 function renderStockList(filter = '') {
   if (!stockList) return;
 
@@ -574,6 +1183,20 @@ async function handleSubmit(event) {
     return;
   }
 
+  const editingId = state.editingId;
+  const existingItem = editingId
+    ? state.items.find((item) => normalizeId(item.id) === normalizeId(editingId))
+    : null;
+
+  if (editingId && !existingItem) {
+    alert('No se encontro el preparado a editar. Recarga la lista e intenta nuevamente.');
+    state.editingId = null;
+    return;
+  }
+
+  const currentStatus = existingItem?.status || STATUS_FLOW[0];
+  const currentStockApplied = Boolean(existingItem?.stockAplicado);
+
   const newItem = {
     id: genId(),
     cliente: formData.get('cliente').trim(),
@@ -584,7 +1207,8 @@ async function handleSubmit(event) {
     fechaCarga: formData.get('fechaCarga'),
     diaEntrega: formData.get('diaEntrega'),
     observaciones: (formData.get('observaciones') || '').trim(),
-    status: STATUS_FLOW[0],
+    status: currentStatus,
+    stockAplicado: currentStockApplied,
     pdf: hasPdf ? { name: pdfFile.name, url: URL.createObjectURL(pdfFile) } : null,
     costo,
     recargo,
@@ -592,35 +1216,64 @@ async function handleSubmit(event) {
     createdAt: Date.now()
   };
 
+  const requiereRecalculoStock = Boolean(existingItem?.stockAplicado)
+    && hasPreparedStockInputsChanged(existingItem, newItem);
+  const mantieneImpactoStock = STOCK_IMPACT_STATUSES.has(currentStatus);
+  const preparedForNewStock = existingItem
+    ? { ...existingItem, ...newItem, id: existingItem.id }
+    : null;
+  let reversionEntries = [];
+  let aplicacionEntries = [];
+
+  if (requiereRecalculoStock && existingItem) {
+    const reversion = await revertStockForPreparado(existingItem, {
+      motivo: 'Reversion por edicion de formula/cantidad/unidad'
+    });
+
+    if (!reversion.ok) {
+      alert(reversion.error || 'No se pudo revertir stock anterior antes de editar.');
+      return;
+    }
+    reversionEntries = reversion.entries || [];
+
+    if (mantieneImpactoStock) {
+      const aplicacion = await applyStockForPreparado(preparedForNewStock, {
+        motivo: 'Reaplicacion de stock por edicion de preparado'
+      });
+
+      if (!aplicacion.ok) {
+        if (reversionEntries.length) {
+          await processStockEntries({
+            preparado: existingItem,
+            entries: reversionEntries,
+            tipoMovimiento: MOVIMIENTO_STOCK_CONSUMO,
+            stockDeltaSign: -1,
+            motivo: 'Rollback por fallo al reaplicar stock en edicion',
+            source: 'rollback'
+          });
+        } else {
+          await applyStockForPreparado(existingItem, {
+            motivo: 'Rollback por fallo al reaplicar stock en edicion'
+          });
+        }
+        alert(aplicacion.error || 'No se pudo reaplicar stock con los nuevos datos del preparado.');
+        return;
+      }
+
+      aplicacionEntries = aplicacion.entries || [];
+      newItem.stockAplicado = true;
+    } else {
+      newItem.stockAplicado = false;
+    }
+  }
+
   let error;
-let insertedRow = null;
+  let savedRow = null;
 
-if (state.editingId) {
-  const result = await supabaseClient
-    .from('preparados')
-    .update({
-      cliente: newItem.cliente,
-      formula: newItem.formula,
-      cantidad: newItem.cantidad,
-      forma_farmaceutica: newItem.formaFarmaceutica,
-      unidad: newItem.unidadMedida,
-      fecha_carga: newItem.fechaCarga || null,
-      dia_entrega: newItem.diaEntrega || null,
-      observaciones: newItem.observaciones,
-      costo: newItem.costo,
-      porcentaje_recargo: newItem.recargo,
-      precio_final: newItem.precioFinal
-    })
-    .eq('id', state.editingId)
-    .select()
-    .single();
-
-  error = result.error;
-} else {
-  const result = await supabaseClient
-    .from('preparados')
-    .insert([
-      {
+  if (editingId) {
+    const result = await supabaseClient
+      .from('preparados')
+      .update({
         cliente: newItem.cliente,
         formula: newItem.formula,
         cantidad: newItem.cantidad,
@@ -629,45 +1282,114 @@ if (state.editingId) {
         fecha_carga: newItem.fechaCarga || null,
         dia_entrega: newItem.diaEntrega || null,
         observaciones: newItem.observaciones,
-        estado: newItem.status,
         costo: newItem.costo,
         porcentaje_recargo: newItem.recargo,
-        precio_final: newItem.precioFinal
-      }
-    ])
-    .select()
-    .single();
+        precio_final: newItem.precioFinal,
+        stock_aplicado: newItem.stockAplicado
+      })
+      .eq('id', editingId)
+      .select()
+      .single();
 
-  error = result.error;
-  insertedRow = result.data;
-} 
+    error = result.error;
+    savedRow = result.data;
+  } else {
+    const result = await supabaseClient
+      .from('preparados')
+      .insert([
+        {
+          cliente: newItem.cliente,
+          formula: newItem.formula,
+          cantidad: newItem.cantidad,
+          forma_farmaceutica: newItem.formaFarmaceutica,
+          unidad: newItem.unidadMedida,
+          fecha_carga: newItem.fechaCarga || null,
+          dia_entrega: newItem.diaEntrega || null,
+          observaciones: newItem.observaciones,
+          estado: newItem.status,
+          costo: newItem.costo,
+          porcentaje_recargo: newItem.recargo,
+          precio_final: newItem.precioFinal,
+          stock_aplicado: false
+        }
+      ])
+      .select()
+      .single();
 
+    error = result.error;
+    savedRow = result.data;
+  }
 
   if (error) {
     console.error('Error guardando en Supabase:', error);
+
+    if (requiereRecalculoStock && existingItem) {
+      if (mantieneImpactoStock && preparedForNewStock) {
+        if (aplicacionEntries.length) {
+          await processStockEntries({
+            preparado: preparedForNewStock,
+            entries: aplicacionEntries,
+            tipoMovimiento: MOVIMIENTO_STOCK_REVERSION,
+            stockDeltaSign: 1,
+            motivo: 'Rollback por fallo guardando edicion',
+            source: 'rollback'
+          });
+        } else {
+          await revertStockForPreparado(preparedForNewStock, {
+            motivo: 'Rollback por fallo guardando edicion'
+          });
+        }
+      }
+
+      if (reversionEntries.length) {
+        await processStockEntries({
+          preparado: existingItem,
+          entries: reversionEntries,
+          tipoMovimiento: MOVIMIENTO_STOCK_CONSUMO,
+          stockDeltaSign: -1,
+          motivo: 'Rollback restaurando stock original por fallo en guardado',
+          source: 'rollback'
+        });
+      } else {
+        await applyStockForPreparado(existingItem, {
+          motivo: 'Rollback restaurando stock original por fallo en guardado'
+        });
+      }
+    }
+
     alert('No se pudo guardar el preparado en Supabase.');
     return;
   }
 
-  if (state.editingId) {
-  state.items = state.items.map(item =>
-    item.id === state.editingId
-      ? { ...item, ...newItem, id: state.editingId }
-      : item
-  );
-} else {
-  state.items.push({
-    ...newItem,
-    id: insertedRow?.id || newItem.id,
-    createdAt: insertedRow?.created_at
-      ? new Date(insertedRow.created_at).getTime()
-      : newItem.createdAt
-  });
-}
-  renderList();
+  if (editingId) {
+    state.items = state.items.map((item) => {
+      if (normalizeId(item.id) !== normalizeId(editingId)) return item;
+      return {
+        ...item,
+        ...newItem,
+        id: editingId,
+        status: savedRow?.estado || newItem.status,
+        stockAplicado: Boolean(savedRow?.stock_aplicado ?? newItem.stockAplicado),
+        createdAt: savedRow?.created_at ? new Date(savedRow.created_at).getTime() : item.createdAt
+      };
+    });
+  } else {
+    state.items.push({
+      ...newItem,
+      id: savedRow?.id || newItem.id,
+      status: savedRow?.estado || newItem.status,
+      stockAplicado: Boolean(savedRow?.stock_aplicado ?? false),
+      createdAt: savedRow?.created_at
+        ? new Date(savedRow.created_at).getTime()
+        : newItem.createdAt
+    });
+  }
+
+  state.editingId = null;
+  renderList(searchInput?.value || '');
   form.reset();
-  updatePrecioFinalUI();
-  alert('Preparado guardado correctamente.');
+  autofillCostoDesdeFormula('');
+  alert(editingId ? 'Preparado actualizado correctamente.' : 'Preparado guardado correctamente.');
 }
 
 /** Escucha el input de busqueda para filtrar al vuelo */
@@ -694,13 +1416,13 @@ function collectIngredients() {
   const materiaMap = new Map(state.stockItems.map((m) => [String(m.id), m]));
 
   const ingredients = rows.map((row) => {
-    const materiaId = row.querySelector('select[name="ingMateriaId"]').value;
+    const materiaId = row.querySelector('select[name="ingMateriaId"]')?.value?.trim() || '';
     const cantidad = Number(row.querySelector('input[name="ingCantidad"]').value);
     const unidad = row.querySelector('select[name="ingUnidad"]').value;
     const observaciones = row.querySelector('input[name="ingObs"]')?.value?.trim() || '';
     const materia = materiaMap.get(String(materiaId));
     return {
-      materia_prima_id: materiaId ? Number(materiaId) : null,
+      materia_prima_id: materiaId || null,
       nombre: materia?.nombre || '',
       cantidad,
       unidad,
@@ -722,7 +1444,7 @@ function collectIngredients() {
 /** Maneja alta/edicion de formula */
 async function handleFormulaSubmit(event) {
   event.preventDefault();
-  if (!ingredientsContainer) return;
+  if (!formulaForm || !ingredientsContainer) return;
 
   const formData = new FormData(formulaForm);
   const ingredientes = collectIngredients();
@@ -732,18 +1454,24 @@ async function handleFormulaSubmit(event) {
   }
 
   const payload = {
-    nombre: formData.get('formulaNombre').trim(),
-    forma_farmaceutica: formData.get('formulaForma'),
-    presentacion_estandar: formData.get('formulaPresentacion').trim()
+    nombre: String(formData.get('formulaNombre') || '').trim(),
+    forma_farmaceutica: String(formData.get('formulaForma') || '').trim(),
+    presentacion_estandar: String(formData.get('formulaPresentacion') || '').trim()
   };
 
+  if (!payload.nombre || !payload.forma_farmaceutica || !payload.presentacion_estandar) {
+    alert('Completa nombre, forma farmaceutica y presentacion estandar.');
+    return;
+  }
+
+  const isEditing = editingFormulaId !== null && editingFormulaId !== undefined;
   let formulaId = editingFormulaId;
 
-  if (editingFormulaId) {
+  if (isEditing) {
     const { data, error } = await supabaseClient
       .from('formulas')
       .update(payload)
-      .eq('id', editingFormulaId)
+      .eq('id', formulaId)
       .select()
       .single();
 
@@ -753,7 +1481,7 @@ async function handleFormulaSubmit(event) {
       return;
     }
 
-    formulaId = data?.id || editingFormulaId;
+    formulaId = data?.id ?? formulaId;
 
     const { error: deleteError } = await supabaseClient
       .from('formula_componentes')
@@ -773,8 +1501,8 @@ async function handleFormulaSubmit(event) {
       .single();
 
     if (error) {
-      console.error('Error creando formula:', error);
-      alert('No se pudo crear la formula.');
+      console.error('Error creando fórmula completo:', error);
+      alert((error && (error.message || error.details || error.hint || JSON.stringify(error))) || 'Error desconocido');
       return;
     }
 
@@ -809,7 +1537,7 @@ async function handleFormulaSubmit(event) {
 
   await loadFormulasDesdeSupabase();
   resetFormulaForm();
-  renderFormulaList(formulaSearch.value);
+  renderFormulaList(formulaSearch?.value || '');
   refreshFormulaOptions();
   alert('Formula guardada correctamente.');
 }
@@ -821,16 +1549,28 @@ function handleFormulaSearch(event) {
 
 /** Inicia edicion rellenando el formulario */
 function startEditFormula(id) {
-  const item = state.formulas.find((f) => f.id === id);
+  if (!formulaForm || !ingredientsContainer) return;
+  const item = findFormulaById(id);
   if (!item) return;
-  editingFormulaId = id;
-  formulaForm.querySelector('input[name="formulaNombre"]').value = item.nombre;
-  formulaForm.querySelector('select[name="formulaForma"]').value = item.forma;
-  formulaForm.querySelector('input[name="formulaPresentacion"]').value = item.presentacion;
+  editingFormulaId = item.id;
+
+  const nombreInput = formulaForm.querySelector('input[name="formulaNombre"]');
+  const formaSelect = formulaForm.querySelector('select[name="formulaForma"]');
+  const presentacionInput = formulaForm.querySelector('input[name="formulaPresentacion"]');
+
+  if (nombreInput) nombreInput.value = item.nombre || '';
+  if (formaSelect) formaSelect.value = item.forma || '';
+  if (presentacionInput) presentacionInput.value = item.presentacion || '';
 
   ingredientsContainer.innerHTML = '';
-  item.ingredientes.forEach((ing) => ingredientsContainer.appendChild(createIngredientRow(ing)));
-  formulaSubmitBtn.textContent = 'Actualizar formula';
+  const ingredientes = Array.isArray(item.ingredientes) ? item.ingredientes : [];
+  if (ingredientes.length) {
+    ingredientes.forEach((ing) => ingredientsContainer.appendChild(createIngredientRow(ing)));
+  } else {
+    ingredientsContainer.appendChild(createIngredientRow());
+  }
+
+  if (formulaSubmitBtn) formulaSubmitBtn.textContent = 'Actualizar formula';
   updateFormulaCostUI();
   formulaForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -862,24 +1602,26 @@ async function deleteFormula(id) {
     return;
   }
 
-  state.formulas = state.formulas.filter((f) => f.id !== id);
-  if (editingFormulaId === id) resetFormulaForm();
-  renderFormulaList(formulaSearch.value);
+  state.formulas = state.formulas.filter((f) => normalizeId(f.id) !== normalizeId(id));
+  if (normalizeId(editingFormulaId) === normalizeId(id)) resetFormulaForm();
+  renderFormulaList(formulaSearch?.value || '');
 }
 
 /** Limpia el formulario de formulas y deja una fila base de ingrediente */
 function resetFormulaForm() {
+  if (!formulaForm || !ingredientsContainer) return;
   editingFormulaId = null;
   formulaForm.reset();
   ingredientsContainer.innerHTML = '';
   ingredientsContainer.appendChild(createIngredientRow());
-  formulaSubmitBtn.textContent = 'Guardar formula';
+  if (formulaSubmitBtn) formulaSubmitBtn.textContent = 'Guardar formula';
   updateFormulaCostUI();
   refreshFormulaOptions();
 }
 
 /** Agrega una fila de ingrediente vacia */
 function handleAddIngredient() {
+  if (!ingredientsContainer) return;
   ingredientsContainer.appendChild(createIngredientRow());
   updateFormulaCostUI();
 }
@@ -1101,8 +1843,8 @@ async function upsertImportedFormulas(formulas) {
 
     const payload = {
       nombre: formula.nombre,
-      forma: formula.forma,
-      presentacion: formula.presentacion
+      forma_farmaceutica: formula.forma,
+      presentacion_estandar: formula.presentacion
     };
 
     if (formulaId) {
@@ -1238,10 +1980,11 @@ async function cargarPreparados() {
     diaEntrega: item.dia_entrega,
     observaciones: item.observaciones,
     status: item.estado,
+    stockAplicado: Boolean(item.stock_aplicado),
     costo: item.costo,
     recargo: item.porcentaje_recargo,
     precioFinal: item.precio_final,
-    createdAt: new Date(item.created_at).getTime()
+    createdAt: item.created_at ? new Date(item.created_at).getTime() : Date.now()
   }));
 }
 
@@ -1249,7 +1992,8 @@ async function cargarPreparados() {
 async function getMateriaMapFresh() {
   const { data, error } = await supabaseClient
     .from('materias_primas')
-    .select('id, nombre, unidad_base, costo_unitario');
+    .select('id, nombre, unidad_base, costo_unitario, stock_actual, stock_minimo, lote, proveedor, fecha_vencimiento, created_at')
+    .order('created_at', { ascending: false });
 
   if (error) {
     console.error('Error cargando materias primas para costos:', error);
@@ -1313,8 +2057,8 @@ async function loadFormulasDesdeSupabase() {
     return {
       id: formula.id,
       nombre: formula.nombre,
-      forma: formula.forma || formula.forma_farmaceutica || '',
-      presentacion: formula.presentacion || formula.presentacion_estandar || '',
+      forma: formula.forma_farmaceutica || formula.forma || '',
+      presentacion: formula.presentacion_estandar || formula.presentacion || '',
       ingredientes,
       costoEstimado,
       createdAt: formula.created_at ? new Date(formula.created_at).getTime() : Date.now()
@@ -1324,7 +2068,7 @@ async function loadFormulasDesdeSupabase() {
   renderFormulaList(formulaSearch?.value || '');
   refreshFormulaOptions();
 
-  if (form && formulaInput && (!costoInput?.value || costoInput.value === '0')) {
+  if (form && formulaInput && formulaInput.value?.trim()) {
     autofillCostoDesdeFormula(formulaInput.value);
   }
 }
@@ -1337,11 +2081,15 @@ async function init() {
     form.addEventListener('submit', handleSubmit);
     searchInput.addEventListener('input', handleSearch);
     const handleFormulaInput = () => autofillCostoDesdeFormula(formulaInput?.value);
+    const handleCantidadUnidadInput = () => updateCostoProporcionalUI();
     formulaInput?.addEventListener('input', handleFormulaInput);
     formulaInput?.addEventListener('change', handleFormulaInput);
+    cantidadInput?.addEventListener('input', handleCantidadUnidadInput);
+    cantidadInput?.addEventListener('change', handleCantidadUnidadInput);
+    unidadMedidaInput?.addEventListener('change', handleCantidadUnidadInput);
     costoInput?.addEventListener('input', updatePrecioFinalUI);
     recargoInput?.addEventListener('input', updatePrecioFinalUI);
-    updatePrecioFinalUI();
+    autofillCostoDesdeFormula(formulaInput?.value);
   }
 
   if (stockForm && stockList && stockSearch) {
