@@ -13,6 +13,28 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 </head>
 <body>
+  <svg class="icon-sprite" aria-hidden="true" focusable="false">
+    <symbol id="icon-user" viewBox="0 0 24 24">
+      <circle cx="12" cy="7" r="4"></circle>
+      <path d="M4 21a8 8 0 0 1 16 0"></path>
+    </symbol>
+    <symbol id="icon-flask" viewBox="0 0 24 24">
+      <path d="M9 3h6"></path>
+      <path d="M10 3v5l-5 9a2 2 0 0 0 1.74 3h10.52A2 2 0 0 0 19 17l-5-9V3"></path>
+      <path d="M7 14h10"></path>
+    </symbol>
+    <symbol id="icon-calendar" viewBox="0 0 24 24">
+      <rect x="3" y="4" width="18" height="17" rx="2"></rect>
+      <path d="M8 2v4"></path>
+      <path d="M16 2v4"></path>
+      <path d="M3 10h18"></path>
+    </symbol>
+    <symbol id="icon-money" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9"></circle>
+      <path d="M12 7v10"></path>
+      <path d="M9.5 9.5c0-1 1.1-1.8 2.5-1.8s2.5.8 2.5 1.8-1.1 1.7-2.5 1.7-2.5.8-2.5 1.8 1.1 1.8 2.5 1.8 2.5-.8 2.5-1.8"></path>
+    </symbol>
+  </svg>
   <!-- Barra de navegacion principal -->
   <header class="topbar">
     <div class="brand logo-brand" aria-label="Guimerans Lab">
@@ -35,23 +57,26 @@
       <div class="section-head">
         <p class="eyebrow">Panel</p>
         <h1>Dashboard</h1>
-        <p class="muted">Resumen inicial del laboratorio. Mantiene un vistazo rapido a las operaciones clave.</p>
+        <p class="muted">Resumen rapido de alertas de stock.</p>
       </div>
-      <div class="grid cards-3">
-        <article class="card">
-          <p class="label">Preparados hoy</p>
-          <h3 class="figure">--</h3>
-          <p class="muted">A la espera de registros reales.</p>
+
+      <div class="dashboard-alerts-grid">
+        <article class="dashboard-alert-card dashboard-alert-card-low">
+          <div class="dashboard-alert-head">
+            <h3>Stock bajo</h3>
+            <span id="dashboardLowStockCount" class="dashboard-alert-count">0</span>
+          </div>
+          <p class="muted">Cantidad actual <= minimo.</p>
+          <div id="dashboardLowStockList" class="dashboard-alert-list" aria-live="polite"></div>
         </article>
-        <article class="card">
-          <p class="label">Pedidos pendientes</p>
-          <h3 class="figure">--</h3>
-          <p class="muted">Se mostrara cuando haya datos cargados.</p>
-        </article>
-        <article class="card highlight">
-          <p class="label">Alertas</p>
-          <h3 class="figure">--</h3>
-          <p class="muted">Sin alertas registradas.</p>
+
+        <article class="dashboard-alert-card dashboard-alert-card-expiring">
+          <div class="dashboard-alert-head">
+            <h3>Vence pronto</h3>
+            <span id="dashboardExpiringCount" class="dashboard-alert-count">0</span>
+          </div>
+          <p class="muted">Vencimiento dentro de 30 dias.</p>
+          <div id="dashboardExpiringList" class="dashboard-alert-list" aria-live="polite"></div>
         </article>
       </div>
     </section>
@@ -68,10 +93,10 @@
         <!-- Formulario de alta de preparados -->
         <form id="prepForm" class="prep-form" aria-label="Registrar nuevo preparado">
           <div class="form-row">
-            <label>Cliente
+            <label><span class="label-with-icon"><svg class="ui-icon ui-icon-sm" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-user"></use></svg>Cliente</span>
               <input type="text" name="cliente" placeholder="Nombre del cliente" required>
             </label>
-            <label>Formula
+            <label><span class="label-with-icon"><svg class="ui-icon ui-icon-sm" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-flask"></use></svg>Formula</span>
               <input list="formulaOptions" type="text" name="formula" placeholder="Ej. Solucion 12B" required>
               <datalist id="formulaOptions"></datalist>
             </label>
@@ -95,10 +120,10 @@
                 <option value="Unidades">Unidades</option>
               </select>
             </label>
-            <label>Fecha de carga
+            <label><span class="label-with-icon"><svg class="ui-icon ui-icon-sm" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-calendar"></use></svg>Fecha de carga</span>
               <input type="date" name="fechaCarga" required>
             </label>
-            <label>Dia de entrega
+            <label><span class="label-with-icon"><svg class="ui-icon ui-icon-sm" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-calendar"></use></svg>Dia de entrega</span>
               <input type="date" name="diaEntrega" required>
             </label>
           </div>
@@ -109,7 +134,7 @@
             <label>Recargo (%)
               <input type="number" name="recargo" min="0" step="0.01" placeholder="Ej. 35" required>
             </label>
-            <label>Precio final
+            <label><span class="label-with-icon"><svg class="ui-icon ui-icon-sm" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-money"></use></svg>Precio final</span>
               <input type="number" name="precioFinal" min="0" step="0.01" placeholder="Calculado" readonly>
             </label>
           </div>
@@ -173,7 +198,7 @@
 
           <div class="ingredients-head">
             <span>Componentes (materia prima, cantidad, unidad)</span>
-            <button type="button" class="btn ghost" id="addIngredientBtn">Agregar materia prima</button>
+            <button type="button" class="btn secondary" id="addIngredientBtn">Agregar materia prima</button>
           </div>
           <div id="ingredientsContainer" class="ingredients-container" aria-live="polite"></div>
 
@@ -187,7 +212,7 @@
 
           <div class="form-actions">
             <button type="submit" class="btn primary" id="formulaSubmitBtn">Guardar formula</button>
-            <button type="button" class="btn ghost" id="formulaResetBtn">Limpiar</button>
+            <button type="button" class="btn secondary" id="formulaResetBtn">Limpiar</button>
             <p class="hint">Las formulas y sus componentes se guardan en Supabase.</p>
           </div>
         </form>
@@ -204,7 +229,7 @@
             </div>
           </div>
           <div class="import-controls">
-            <button type="button" class="btn ghost" id="importBtn">Importar desde CSV/Excel</button>
+            <button type="button" class="btn secondary" id="importBtn">Importar desde CSV/Excel</button>
             <input type="file" id="importInput" accept=".csv, .xls, .xlsx" hidden>
             <p class="hint">Columnas: Nombre del preparado, Ingrediente, Cantidad por presentacion, Unidad, Forma farmaceutica.</p>
             <div id="importSummary" class="import-summary"></div>
@@ -328,7 +353,7 @@
             </label>
           </div>
           <div class="modal-actions">
-            <button type="button" class="btn ghost modal-cancel">Cancelar</button>
+            <button type="button" class="btn secondary modal-cancel">Cancelar</button>
             <button type="submit" class="btn primary">Guardar cambios</button>
           </div>
         </form>

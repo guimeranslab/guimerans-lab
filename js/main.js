@@ -18,6 +18,10 @@ const searchInput = document.getElementById('searchInput');
 const stockForm = document.getElementById('stockForm');
 const stockList = document.getElementById('stockList');
 const stockSearch = document.getElementById('stockSearch');
+const dashboardLowStockList = document.getElementById('dashboardLowStockList');
+const dashboardExpiringList = document.getElementById('dashboardExpiringList');
+const dashboardLowStockCount = document.getElementById('dashboardLowStockCount');
+const dashboardExpiringCount = document.getElementById('dashboardExpiringCount');
 const formulaForm = document.getElementById('formulaForm');
 const ingredientsContainer = document.getElementById('ingredientsContainer');
 const addIngredientBtn = document.getElementById('addIngredientBtn');
@@ -45,6 +49,7 @@ let selectedPrepFormulaBase = null;
 const STOCK_IMPACT_STATUSES = new Set(['Listo', 'Entregado']);
 const MOVIMIENTO_STOCK_CONSUMO = 'consumo_preparado';
 const MOVIMIENTO_STOCK_REVERSION = 'reversion_preparado';
+const PREPARADOS_RECETAS_BUCKET = 'recetas-preparados';
 
 // ---- Helpers de datos ----
 
@@ -500,6 +505,110 @@ function normalizeId(value) {
   return String(value);
 }
 
+function sanitizeStorageFileName(fileName) {
+  const normalized = String(fileName || 'receta.pdf')
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  return normalized || `receta_${Date.now()}.pdf`;
+}
+
+function sanitizeStorageSegment(value) {
+  const normalized = String(value || '')
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return normalized || 'preparado';
+}
+
+function buildRecetaStoragePath(preparadoId, fileName) {
+  const safePreparadoId = sanitizeStorageSegment(preparadoId);
+  const safeFileName = sanitizeStorageFileName(fileName);
+  return `${safePreparadoId}/${safePreparadoId}_${Date.now()}_${safeFileName}`;
+}
+
+function getPublicUrlForRecetaPath(path) {
+  const recetaPath = String(path || '').trim();
+  if (!recetaPath) return '';
+  const { data } = supabaseClient
+    .storage
+    .from(PREPARADOS_RECETAS_BUCKET)
+    .getPublicUrl(recetaPath);
+  return data?.publicUrl || '';
+}
+
+function buildRecetaData({ nombre, path, url } = {}) {
+  const recetaPath = String(path || '').trim();
+  const recetaUrl = String(url || '').trim() || getPublicUrlForRecetaPath(recetaPath);
+  const recetaNombre = String(nombre || '').trim()
+    || (recetaPath ? recetaPath.split('/').pop() : '')
+    || 'receta.pdf';
+
+  if (!recetaPath && !recetaUrl) return null;
+
+  return {
+    name: recetaNombre,
+    path: recetaPath,
+    url: recetaUrl
+  };
+}
+
+async function uploadRecetaToStorage(preparadoId, file) {
+  if (!file || Number(file.size) <= 0) {
+    return { ok: false, error: new Error('Archivo de receta invalido.') };
+  }
+
+  const path = buildRecetaStoragePath(preparadoId, file.name);
+  const { error: uploadError } = await supabaseClient
+    .storage
+    .from(PREPARADOS_RECETAS_BUCKET)
+    .upload(path, file, {
+      cacheControl: '3600',
+      upsert: false,
+      contentType: file.type || 'application/pdf'
+    });
+
+  if (uploadError) {
+    return { ok: false, error: uploadError };
+  }
+
+  const url = getPublicUrlForRecetaPath(path);
+  if (!url) {
+    await supabaseClient.storage.from(PREPARADOS_RECETAS_BUCKET).remove([path]);
+    return { ok: false, error: new Error('No se pudo obtener la URL publica de la receta.') };
+  }
+
+  return {
+    ok: true,
+    data: {
+      name: file.name || sanitizeStorageFileName(path),
+      path,
+      url
+    }
+  };
+}
+
+async function removeRecetaFromStorage(path) {
+  const recetaPath = String(path || '').trim();
+  if (!recetaPath) return { ok: true };
+
+  const { error } = await supabaseClient
+    .storage
+    .from(PREPARADOS_RECETAS_BUCKET)
+    .remove([recetaPath]);
+
+  if (error) return { ok: false, error };
+  return { ok: true };
+}
+
 /** Devuelve una formula por id sin depender del tipo */
 function findFormulaById(id) {
   const targetId = normalizeId(id);
@@ -706,6 +815,7 @@ function applyLocalMateriaStocks(nextStocksById) {
   });
 
   renderStockList(stockSearch?.value || '');
+  renderDashboardAlerts();
   refreshIngredientRowsOptions();
 }
 
@@ -880,6 +990,89 @@ function updateFormulaCostUI() {
 
 // ---- Render de interfaz ----
 
+function renderEmptyState() {
+  return `
+    <div class="empty-state" role="status" aria-live="polite">
+      <span class="empty-state-icon" aria-hidden="true">+</span>
+      <p class="empty-state-title">No hay datos todav&iacute;a</p>
+      <p class="empty-state-subtitle">Agreg&aacute; tu primer elemento para comenzar</p>
+    </div>
+  `;
+}
+
+function uiIcon(name, sizeClass = 'ui-icon-sm') {
+  return `<svg class="ui-icon ${sizeClass}" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-${name}"></use></svg>`;
+}
+
+function formatDashboardDate(dateStr) {
+  const parsed = parseDateSafe(dateStr);
+  if (!parsed) return '-';
+  return parsed.toLocaleDateString('es-AR', { year: 'numeric', month: '2-digit', day: '2-digit' });
+}
+
+function renderDashboardAlertEmpty(message) {
+  return `
+    <div class="dashboard-alert-empty">
+      <span class="dashboard-alert-empty-icon" aria-hidden="true">+</span>
+      <p>${message}</p>
+    </div>
+  `;
+}
+
+function renderDashboardAlerts() {
+  if (!dashboardLowStockList || !dashboardExpiringList) return;
+
+  const stockItems = Array.isArray(state.stockItems) ? state.stockItems : [];
+  const lowStockItems = stockItems
+    .filter((item) => isStockBelowMinimum(item))
+    .sort((a, b) => (Number(a.stock_actual) || 0) - (Number(b.stock_actual) || 0));
+
+  const expiringItems = stockItems
+    .filter((item) => isStockExpiringSoon(item.fecha_vencimiento, 30))
+    .sort((a, b) => {
+      const aTime = parseDateSafe(a.fecha_vencimiento)?.getTime() || Number.MAX_SAFE_INTEGER;
+      const bTime = parseDateSafe(b.fecha_vencimiento)?.getTime() || Number.MAX_SAFE_INTEGER;
+      return aTime - bTime;
+    });
+
+  dashboardLowStockCount.textContent = String(lowStockItems.length);
+  dashboardExpiringCount.textContent = String(expiringItems.length);
+
+  if (!lowStockItems.length) {
+    dashboardLowStockList.innerHTML = renderDashboardAlertEmpty('Sin alertas de stock bajo');
+  } else {
+    dashboardLowStockList.innerHTML = lowStockItems.map((item) => `
+      <article class="dashboard-alert-item">
+        <div class="dashboard-alert-item-top">
+          <strong>${item.nombre || 'Materia prima'}</strong>
+          ${item.lote ? `<span class="dashboard-alert-lote">Lote ${item.lote}</span>` : ''}
+        </div>
+        <div class="dashboard-alert-item-meta">
+          <span>Actual: <strong>${Number(item.stock_actual || 0)} ${item.unidad_base || ''}</strong></span>
+          <span>Minimo: <strong>${Number(item.stock_minimo || 0)} ${item.unidad_base || ''}</strong></span>
+        </div>
+      </article>
+    `).join('');
+  }
+
+  if (!expiringItems.length) {
+    dashboardExpiringList.innerHTML = renderDashboardAlertEmpty('Sin materias primas proximas a vencer');
+  } else {
+    dashboardExpiringList.innerHTML = expiringItems.map((item) => `
+      <article class="dashboard-alert-item">
+        <div class="dashboard-alert-item-top">
+          <strong>${item.nombre || 'Materia prima'}</strong>
+          ${item.lote ? `<span class="dashboard-alert-lote">Lote ${item.lote}</span>` : ''}
+        </div>
+        <div class="dashboard-alert-item-meta">
+          <span>Vence: <strong>${formatDashboardDate(item.fecha_vencimiento)}</strong></span>
+          <span>Cantidad: <strong>${Number(item.stock_actual || 0)} ${item.unidad_base || ''}</strong></span>
+        </div>
+      </article>
+    `).join('');
+  }
+}
+
 /** Renderiza la lista de preparados aplicando filtro de busqueda */
 function renderList(term = '') {
   listContainer.innerHTML = '';
@@ -888,7 +1081,7 @@ function renderList(term = '') {
     .sort((a, b) => b.createdAt - a.createdAt);
 
   if (!filtered.length) {
-    listContainer.innerHTML = '<div class="empty-state">No hay preparados pendientes.</div>';
+    listContainer.innerHTML = renderEmptyState();
     return;
   }
 
@@ -901,35 +1094,57 @@ function renderList(term = '') {
     const nextLabel = STATUS_FLOW[nextIndex] ? `Avanzar a ${STATUS_FLOW[nextIndex]}` : 'Estado final';
 
     card.innerHTML = `
-      <div class="title-line">
-        <span class="pill status status-${item.status.toLowerCase()}">${item.status}</span>
-        <span>${item.cliente}</span>
-        <span class="badge">${item.formula}</span>
-        <span class="badge">${item.formaFarmaceutica}</span>
+      <div class="prep-card-head">
+        <div class="prep-title-wrap">
+          <span class="pill status status-${item.status.toLowerCase()}">${item.status}</span>
+          <span class="prep-client">${uiIcon('user', 'ui-icon-md')}${item.cliente}</span>
+        </div>
+        <div class="prep-chips">
+          <span class="badge prep-chip">${uiIcon('flask', 'ui-icon-xs')}${item.formula}</span>
+          <span class="badge prep-chip">${item.formaFarmaceutica}</span>
+        </div>
       </div>
-      <div class="row">
-        <span class="meta">Cantidad: <strong>${formatCantidad(item)}</strong></span>
-        <span class="meta">Carga: ${item.fechaCarga}</span>
-        <span class="meta">Entrega: ${item.diaEntrega}</span>
+      <div class="prep-metrics">
+        <div class="metric">
+          <span class="metric-label">Cantidad</span>
+          <strong>${formatCantidad(item)}</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">${uiIcon('calendar', 'ui-icon-xs')}Carga</span>
+          <strong>${item.fechaCarga}</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">${uiIcon('calendar', 'ui-icon-xs')}Entrega</span>
+          <strong>${item.diaEntrega}</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Costo</span>
+          <strong>$${(item.costo ?? 0).toFixed ? item.costo.toFixed(2) : Number(item.costo).toFixed(2)}</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Recargo</span>
+          <strong>${(item.recargo ?? 0)}%</strong>
+        </div>
+        <div class="metric metric-highlight">
+          <span class="metric-label">${uiIcon('money', 'ui-icon-xs')}Precio final</span>
+          <strong>$${(item.precioFinal ?? 0).toFixed ? item.precioFinal.toFixed(2) : Number(item.precioFinal).toFixed(2)}</strong>
+        </div>
       </div>
-      <div class="row">
-        <span class="meta">Costo: $${(item.costo ?? 0).toFixed ? item.costo.toFixed(2) : Number(item.costo).toFixed(2)}</span>
-        <span class="meta">Recargo: ${(item.recargo ?? 0)}%</span>
-        <span class="meta">Precio final: <strong>$${(item.precioFinal ?? 0).toFixed ? item.precioFinal.toFixed(2) : Number(item.precioFinal).toFixed(2)}</strong></span>
-      </div>
-      <p class="meta">Notas: ${item.observaciones || 'Sin observaciones'}</p>
-      <div class="row">
-  <div class="meta">
-    PDF: ${item.pdf ? `<a class="pdf-link" href="${item.pdf.url}" target="_blank" rel="noopener">${item.pdf.name}</a>` : 'No adjuntado'}
-  </div>
+      <p class="meta prep-notes">Notas: ${item.observaciones || 'Sin observaciones'}</p>
+      <div class="prep-card-footer">
+        <div class="meta prep-pdf">
+          PDF: ${item.pdf && item.pdf.url
+      ? `<span>${item.pdf.name}</span> &middot; <a class="pdf-link" href="${item.pdf.url}" target="_blank" rel="noopener">Ver receta</a> &middot; <a class="pdf-link" href="${item.pdf.url}" download="${sanitizeStorageFileName(item.pdf.name)}">Descargar receta</a> &middot; <button type="button" class="pdf-link pdf-delete-link" data-action="delete-receta">Eliminar receta</button>`
+      : 'No adjuntado'}
+        </div>
 
-  <div class="actions">
-    <button class="btn ghost" data-action="advance" ${item.status === 'Entregado' ? 'disabled' : ''}>${nextLabel}</button>
-    ${item.status !== 'Pendiente' ? '<button class="btn ghost" data-action="to-pending">Volver a Pendiente</button>' : ''}
-    <button class="btn ghost" data-action="edit">Editar</button>
-    <button class="btn ghost" data-action="delete">Eliminar</button>
-  </div>
-</div>
+        <div class="actions">
+          <button class="btn primary" data-action="advance" ${item.status === 'Entregado' ? 'disabled' : ''}>${nextLabel}</button>
+          ${item.status !== 'Pendiente' ? '<button class="btn secondary" data-action="to-pending">Volver a Pendiente</button>' : ''}
+          <button class="btn secondary" data-action="edit">Editar</button>
+          <button class="btn danger" data-action="delete">Eliminar</button>
+        </div>
+      </div>
     `;
 
     const advanceBtn = card.querySelector('[data-action="advance"]');
@@ -950,6 +1165,11 @@ if (toPendingBtn) {
 const deleteBtn = card.querySelector('[data-action="delete"]');
 if (deleteBtn) {
   deleteBtn.addEventListener('click', () => deletePreparado(item.id));
+}
+
+const deleteRecetaBtn = card.querySelector('[data-action="delete-receta"]');
+if (deleteRecetaBtn) {
+  deleteRecetaBtn.addEventListener('click', () => deletePreparadoReceta(item.id));
 }
 
     listContainer.appendChild(card);
@@ -975,8 +1195,52 @@ if (deleteBtn) {
 }
 }
 
+async function deletePreparadoReceta(id) {
+  const item = state.items.find((prep) => normalizeId(prep.id) === normalizeId(id));
+  const recetaPath = item?.pdf?.path || '';
+
+  if (!item || !recetaPath) {
+    alert('Este preparado no tiene receta adjunta.');
+    return;
+  }
+
+  const confirmar = confirm('Seguro que queres eliminar la receta adjunta?');
+  if (!confirmar) return;
+
+  const storageResult = await removeRecetaFromStorage(recetaPath);
+  if (!storageResult.ok) {
+    console.error('No se pudo eliminar la receta del storage:', storageResult.error);
+    alert('No se pudo eliminar la receta del storage. Intenta nuevamente.');
+    return;
+  }
+
+  const { error } = await supabaseClient
+    .from('preparados')
+    .update({
+      archivo_receta_nombre: null,
+      archivo_receta_path: null,
+      archivo_receta_url: null
+    })
+    .eq('id', id);
+
+  if (error) {
+    console.error('No se pudo limpiar la receta en la base de datos:', error);
+    alert('La receta se elimino del storage, pero no se pudo actualizar el preparado en la base de datos.');
+    return;
+  }
+
+  state.items = state.items.map((prep) => {
+    if (normalizeId(prep.id) !== normalizeId(id)) return prep;
+    return { ...prep, pdf: null };
+  });
+
+  renderList(searchInput?.value || '');
+  alert('Receta eliminada correctamente.');
+}
+
 async function deletePreparado(id) {
   const item = state.items.find((prep) => normalizeId(prep.id) === normalizeId(id));
+  const recetaPath = item?.pdf?.path || '';
   const confirmar = confirm('Quieres eliminar este preparado?');
   if (!confirmar) return;
 
@@ -1025,9 +1289,18 @@ async function deletePreparado(id) {
     return;
   }
 
+  let recetaDeleteWarning = '';
+  if (recetaPath) {
+    const recetaDeleteResult = await removeRecetaFromStorage(recetaPath);
+    if (!recetaDeleteResult.ok) {
+      console.error('No se pudo eliminar la receta del storage:', recetaDeleteResult.error);
+      recetaDeleteWarning = ' Se elimino el preparado, pero no se pudo eliminar la receta del storage.';
+    }
+  }
+
   state.items = state.items.filter((prep) => normalizeId(prep.id) !== normalizeId(id));
   renderList(searchInput?.value || '');
-  alert('Preparado eliminado correctamente.');
+  alert(`Preparado eliminado correctamente.${recetaDeleteWarning}`);
 }
 
 
@@ -1052,7 +1325,7 @@ function renderStockList(filter = '') {
   });
 
   if (filtered.length === 0) {
-    stockList.innerHTML = `<div class="placeholder">No hay stock cargado.</div>`;
+    stockList.innerHTML = renderEmptyState();
     return;
   }
 
@@ -1079,8 +1352,8 @@ function renderStockList(filter = '') {
             <div class="stock-meta">Lote: ${item.lote || '-'}</div>
           </div>
           <div class="stock-actions">
-            <button type="button" class="btn ghost edit-stock-btn" data-id="${item.id}">Editar</button>
-            <button type="button" class="btn ghost delete-stock-btn" data-id="${item.id}">Eliminar</button>
+            <button type="button" class="btn secondary edit-stock-btn" data-id="${item.id}">Editar</button>
+            <button type="button" class="btn danger delete-stock-btn" data-id="${item.id}">Eliminar</button>
           </div>
         </div>
         <div class="row stock-row">
@@ -1121,7 +1394,7 @@ function renderFormulaList(term = '') {
     .sort((a, b) => b.createdAt - a.createdAt);
 
   if (!filtered.length) {
-    formulaList.innerHTML = '<div class="empty-state">No hay formulas cargadas.</div>';
+    formulaList.innerHTML = renderEmptyState();
     return;
   }
 
@@ -1137,23 +1410,23 @@ function renderFormulaList(term = '') {
       .join('');
 
     card.innerHTML = `
-      <div class="row">
+      <div class="row formula-card-head">
         <div class="title-line">
-          <span>${item.nombre}</span>
-          <span class="badge">${item.forma}</span>
+          <span class="formula-title">${item.nombre}</span>
+          <span class="badge prep-chip">${item.forma}</span>
         </div>
         <span class="formula-meta">Presentacion: ${item.presentacion}</span>
       </div>
       <div>
         <p class="formula-meta">Ingredientes:</p>
-        <ul class="formula-meta" style="padding-left:18px; margin: 4px 0 8px 0;">${ingList}</ul>
+        <ul class="formula-ingredients">${ingList}</ul>
       </div>
-      <div class="row">
+      <div class="row formula-card-footer">
         <div class="formula-meta">Costo estimado: <strong>$${Number(item.costoEstimado ?? 0).toFixed(2)}</strong></div>
         <div class="formula-meta">ID: ${item.id}</div>
         <div class="actions">
-          <button class="btn ghost" data-action="edit">Editar</button>
-          <button class="btn ghost" data-action="delete">Eliminar</button>
+          <button class="btn secondary" data-action="edit">Editar</button>
+          <button class="btn danger" data-action="delete">Eliminar</button>
         </div>
       </div>
     `;
@@ -1173,7 +1446,7 @@ async function handleSubmit(event) {
   const formData = new FormData(form);
 
   const pdfFile = formData.get('pdf');
-  const hasPdf = pdfFile && pdfFile.size > 0;
+  const hasPdf = pdfFile && Number(pdfFile.size) > 0;
   const costo = Number(formData.get('costo'));
   const recargo = Number(formData.get('recargo'));
   const precioFinal = calcPrecioFinal(costo, recargo);
@@ -1196,6 +1469,11 @@ async function handleSubmit(event) {
 
   const currentStatus = existingItem?.status || STATUS_FLOW[0];
   const currentStockApplied = Boolean(existingItem?.stockAplicado);
+  const currentReceta = buildRecetaData({
+    nombre: existingItem?.pdf?.name,
+    path: existingItem?.pdf?.path,
+    url: existingItem?.pdf?.url
+  });
 
   const newItem = {
     id: genId(),
@@ -1209,12 +1487,29 @@ async function handleSubmit(event) {
     observaciones: (formData.get('observaciones') || '').trim(),
     status: currentStatus,
     stockAplicado: currentStockApplied,
-    pdf: hasPdf ? { name: pdfFile.name, url: URL.createObjectURL(pdfFile) } : null,
+    pdf: currentReceta,
     costo,
     recargo,
     precioFinal: Number(precioFinal.toFixed(2)),
     createdAt: Date.now()
   };
+
+  let uploadedReceta = null;
+  let shouldDeletePreviousReceta = false;
+  const previousRecetaPath = currentReceta?.path || '';
+
+  if (editingId && hasPdf) {
+    const uploadResult = await uploadRecetaToStorage(editingId, pdfFile);
+    if (!uploadResult.ok) {
+      console.error('Error subiendo receta al bucket:', uploadResult.error);
+      alert('No se pudo subir la receta al almacenamiento.');
+      return;
+    }
+
+    uploadedReceta = uploadResult.data;
+    newItem.pdf = uploadedReceta;
+    shouldDeletePreviousReceta = Boolean(previousRecetaPath) && previousRecetaPath !== uploadedReceta.path;
+  }
 
   const requiereRecalculoStock = Boolean(existingItem?.stockAplicado)
     && hasPreparedStockInputsChanged(existingItem, newItem);
@@ -1231,6 +1526,9 @@ async function handleSubmit(event) {
     });
 
     if (!reversion.ok) {
+      if (uploadedReceta?.path) {
+        await removeRecetaFromStorage(uploadedReceta.path);
+      }
       alert(reversion.error || 'No se pudo revertir stock anterior antes de editar.');
       return;
     }
@@ -1256,6 +1554,9 @@ async function handleSubmit(event) {
             motivo: 'Rollback por fallo al reaplicar stock en edicion'
           });
         }
+        if (uploadedReceta?.path) {
+          await removeRecetaFromStorage(uploadedReceta.path);
+        }
         alert(aplicacion.error || 'No se pudo reaplicar stock con los nuevos datos del preparado.');
         return;
       }
@@ -1269,24 +1570,33 @@ async function handleSubmit(event) {
 
   let error;
   let savedRow = null;
+  let shouldRollbackInsertedRow = false;
 
   if (editingId) {
+    const updatePayload = {
+      cliente: newItem.cliente,
+      formula: newItem.formula,
+      cantidad: newItem.cantidad,
+      forma_farmaceutica: newItem.formaFarmaceutica,
+      unidad: newItem.unidadMedida,
+      fecha_carga: newItem.fechaCarga || null,
+      dia_entrega: newItem.diaEntrega || null,
+      observaciones: newItem.observaciones,
+      costo: newItem.costo,
+      porcentaje_recargo: newItem.recargo,
+      precio_final: newItem.precioFinal,
+      stock_aplicado: newItem.stockAplicado
+    };
+
+    if (uploadedReceta) {
+      updatePayload.archivo_receta_nombre = uploadedReceta.name;
+      updatePayload.archivo_receta_path = uploadedReceta.path;
+      updatePayload.archivo_receta_url = uploadedReceta.url;
+    }
+
     const result = await supabaseClient
       .from('preparados')
-      .update({
-        cliente: newItem.cliente,
-        formula: newItem.formula,
-        cantidad: newItem.cantidad,
-        forma_farmaceutica: newItem.formaFarmaceutica,
-        unidad: newItem.unidadMedida,
-        fecha_carga: newItem.fechaCarga || null,
-        dia_entrega: newItem.diaEntrega || null,
-        observaciones: newItem.observaciones,
-        costo: newItem.costo,
-        porcentaje_recargo: newItem.recargo,
-        precio_final: newItem.precioFinal,
-        stock_aplicado: newItem.stockAplicado
-      })
+      .update(updatePayload)
       .eq('id', editingId)
       .select()
       .single();
@@ -1310,6 +1620,9 @@ async function handleSubmit(event) {
           costo: newItem.costo,
           porcentaje_recargo: newItem.recargo,
           precio_final: newItem.precioFinal,
+          archivo_receta_nombre: null,
+          archivo_receta_path: null,
+          archivo_receta_url: null,
           stock_aplicado: false
         }
       ])
@@ -1318,10 +1631,64 @@ async function handleSubmit(event) {
 
     error = result.error;
     savedRow = result.data;
+
+    if (!error && hasPdf) {
+      const savedPreparadoId = savedRow?.id;
+      if (!savedPreparadoId) {
+        error = new Error('No se pudo obtener el ID del preparado para subir la receta.');
+        shouldRollbackInsertedRow = true;
+      } else {
+        const uploadResult = await uploadRecetaToStorage(savedPreparadoId, pdfFile);
+
+        if (!uploadResult.ok) {
+          console.error('Error subiendo receta al bucket:', uploadResult.error);
+          error = uploadResult.error || new Error('No se pudo subir la receta.');
+          shouldRollbackInsertedRow = true;
+        } else {
+          uploadedReceta = uploadResult.data;
+          newItem.pdf = uploadedReceta;
+
+          const recetaUpdateResult = await supabaseClient
+            .from('preparados')
+            .update({
+              archivo_receta_nombre: uploadedReceta.name,
+              archivo_receta_path: uploadedReceta.path,
+              archivo_receta_url: uploadedReceta.url
+            })
+            .eq('id', savedPreparadoId)
+            .select()
+            .single();
+
+          if (recetaUpdateResult.error) {
+            console.error('Error guardando metadata de receta en preparado:', recetaUpdateResult.error);
+            error = recetaUpdateResult.error;
+            shouldRollbackInsertedRow = true;
+            await removeRecetaFromStorage(uploadedReceta.path);
+          } else {
+            savedRow = recetaUpdateResult.data;
+          }
+        }
+      }
+    }
   }
 
   if (error) {
     console.error('Error guardando en Supabase:', error);
+
+    if (uploadedReceta?.path && editingId) {
+      await removeRecetaFromStorage(uploadedReceta.path);
+    }
+
+    if (!editingId && shouldRollbackInsertedRow && savedRow?.id) {
+      const rollbackDelete = await supabaseClient
+        .from('preparados')
+        .delete()
+        .eq('id', savedRow.id);
+
+      if (rollbackDelete.error) {
+        console.error('No se pudo limpiar preparado creado tras fallo de receta:', rollbackDelete.error);
+      }
+    }
 
     if (requiereRecalculoStock && existingItem) {
       if (mantieneImpactoStock && preparedForNewStock) {
@@ -1361,12 +1728,27 @@ async function handleSubmit(event) {
     return;
   }
 
+  if (editingId && shouldDeletePreviousReceta) {
+    const deletePreviousReceta = await removeRecetaFromStorage(previousRecetaPath);
+    if (!deletePreviousReceta.ok) {
+      console.error('No se pudo eliminar la receta previa del storage:', deletePreviousReceta.error);
+      alert('El preparado se actualizo, pero no se pudo eliminar la receta anterior del storage.');
+    }
+  }
+
+  const savedReceta = buildRecetaData({
+    nombre: savedRow?.archivo_receta_nombre,
+    path: savedRow?.archivo_receta_path,
+    url: savedRow?.archivo_receta_url
+  }) || newItem.pdf || null;
+
   if (editingId) {
     state.items = state.items.map((item) => {
       if (normalizeId(item.id) !== normalizeId(editingId)) return item;
       return {
         ...item,
         ...newItem,
+        pdf: savedReceta,
         id: editingId,
         status: savedRow?.estado || newItem.status,
         stockAplicado: Boolean(savedRow?.stock_aplicado ?? newItem.stockAplicado),
@@ -1376,6 +1758,7 @@ async function handleSubmit(event) {
   } else {
     state.items.push({
       ...newItem,
+      pdf: savedReceta,
       id: savedRow?.id || newItem.id,
       status: savedRow?.estado || newItem.status,
       stockAplicado: Boolean(savedRow?.stock_aplicado ?? false),
@@ -1984,6 +2367,11 @@ async function cargarPreparados() {
     costo: item.costo,
     recargo: item.porcentaje_recargo,
     precioFinal: item.precio_final,
+    pdf: buildRecetaData({
+      nombre: item.archivo_receta_nombre,
+      path: item.archivo_receta_path,
+      url: item.archivo_receta_url
+    }),
     createdAt: item.created_at ? new Date(item.created_at).getTime() : Date.now()
   }));
 }
@@ -2001,6 +2389,7 @@ async function getMateriaMapFresh() {
   }
 
   state.stockItems = data || [];
+  renderDashboardAlerts();
   refreshIngredientRowsOptions();
 
   return new Map((data || []).map((m) => [String(m.id), m]));
@@ -2133,6 +2522,7 @@ async function renderStockDesdeSupabase() {
 
   state.stockItems = data || [];
   renderStockList(stockSearch?.value || '');
+  renderDashboardAlerts();
   refreshIngredientRowsOptions();
 }
 async function handleEditStock(id) {
@@ -2143,4 +2533,3 @@ async function handleEditStock(id) {
   }
   openStockEditModal(item);
 }
-
