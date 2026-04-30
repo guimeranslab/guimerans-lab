@@ -50,6 +50,195 @@ const STOCK_IMPACT_STATUSES = new Set(['Listo', 'Entregado']);
 const MOVIMIENTO_STOCK_CONSUMO = 'consumo_preparado';
 const MOVIMIENTO_STOCK_REVERSION = 'reversion_preparado';
 const PREPARADOS_RECETAS_BUCKET = 'recetas-preparados';
+const CACHE_TTL_MS = 2 * 60 * 1000;
+const SEARCH_DEBOUNCE_MS = 280;
+const PERF_LOGS = false;
+
+const dataCache = {
+  preparados: { loaded: false, dirty: true, lastLoadedAt: 0, loadingPromise: null },
+  stock: { loaded: false, dirty: true, lastLoadedAt: 0, loadingPromise: null },
+  formulas: { loaded: false, dirty: true, lastLoadedAt: 0, loadingPromise: null },
+  clientes: { loaded: false, dirty: false, lastLoadedAt: 0, loadingPromise: null }
+};
+
+const runtimeState = {
+  uiMounted: false,
+  confirmResolver: null
+};
+
+function perfStart(label) {
+  if (!PERF_LOGS) return;
+  console.time(label);
+}
+
+function perfEnd(label) {
+  if (!PERF_LOGS) return;
+  console.timeEnd(label);
+}
+
+function isCacheFresh(key) {
+  const cache = dataCache[key];
+  if (!cache || !cache.loaded || cache.dirty) return false;
+  return Date.now() - cache.lastLoadedAt <= CACHE_TTL_MS;
+}
+
+function markCacheDirty(...keys) {
+  keys.forEach((key) => {
+    if (!dataCache[key]) return;
+    dataCache[key].dirty = true;
+  });
+}
+
+function markCacheFresh(key) {
+  if (!dataCache[key]) return;
+  dataCache[key].loaded = true;
+  dataCache[key].dirty = false;
+  dataCache[key].lastLoadedAt = Date.now();
+}
+
+function debounce(fn, delay = SEARCH_DEBOUNCE_MS) {
+  let timer = null;
+  return (...args) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), delay);
+  };
+}
+
+function setButtonLoading(button, loading, loadingText = 'Procesando...') {
+  if (!button) return;
+  if (loading) {
+    if (!button.dataset.originalText) button.dataset.originalText = button.textContent;
+    button.disabled = true;
+    button.classList.add('is-loading');
+    button.textContent = loadingText;
+    return;
+  }
+  const original = button.dataset.originalText;
+  if (original) button.textContent = original;
+  delete button.dataset.originalText;
+  button.classList.remove('is-loading');
+  button.disabled = false;
+}
+
+async function runWithButtonLoading(button, task, loadingText = 'Procesando...') {
+  setButtonLoading(button, true, loadingText);
+  try {
+    return await task();
+  } finally {
+    setButtonLoading(button, false);
+  }
+}
+
+function renderInlineLoading(message = 'Cargando...') {
+  return `
+    <div class="empty-state loading-state" role="status" aria-live="polite">
+      <span class="empty-state-icon spinner" aria-hidden="true"></span>
+      <p class="empty-state-title">${message}</p>
+    </div>
+  `;
+}
+
+function ensureUiLayer() {
+  if (runtimeState.uiMounted) return;
+  const toastRoot = document.createElement('div');
+  toastRoot.className = 'toast-root';
+  toastRoot.id = 'toastRoot';
+  document.body.appendChild(toastRoot);
+
+  const confirmRoot = document.createElement('div');
+  confirmRoot.className = 'confirm-modal hidden';
+  confirmRoot.id = 'confirmModal';
+  confirmRoot.innerHTML = `
+    <div class="confirm-backdrop" data-action="cancel"></div>
+    <div class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <h3 id="confirmTitle">Confirmar accion</h3>
+      <p id="confirmMessage" class="muted">Estas seguro?</p>
+      <div class="confirm-actions">
+        <button type="button" class="btn secondary" data-action="cancel">Cancelar</button>
+        <button type="button" class="btn danger" data-action="confirm">Confirmar</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(confirmRoot);
+
+  confirmRoot.addEventListener('click', (event) => {
+    const action = event.target?.dataset?.action;
+    if (action === 'confirm') {
+      resolveConfirm(true);
+    } else if (action === 'cancel') {
+      resolveConfirm(false);
+    }
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (confirmRoot.classList.contains('hidden')) return;
+    resolveConfirm(false);
+  });
+
+  runtimeState.uiMounted = true;
+}
+
+function guessToastType(message) {
+  const text = normalizeText(message);
+  if (/error|fallo|no se pudo|invalido|invalida|problema/.test(text)) return 'error';
+  if (/eliminad|actualizad|guardad|correctamente|exitos/.test(text)) return 'success';
+  if (/cargando|procesando/.test(text)) return 'info';
+  return 'info';
+}
+
+function showToast(message, type = 'info', timeout = 2800) {
+  ensureUiLayer();
+  const root = document.getElementById('toastRoot');
+  if (!root) return;
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.setAttribute('role', 'status');
+  toast.textContent = String(message || '');
+  root.appendChild(toast);
+
+  requestAnimationFrame(() => toast.classList.add('show'));
+  setTimeout(() => {
+    toast.classList.remove('show');
+    setTimeout(() => toast.remove(), 220);
+  }, timeout);
+}
+
+function alert(message) {
+  showToast(message, guessToastType(message));
+}
+
+function resolveConfirm(confirmed) {
+  const root = document.getElementById('confirmModal');
+  if (root) root.classList.add('hidden');
+  if (runtimeState.confirmResolver) {
+    runtimeState.confirmResolver(Boolean(confirmed));
+    runtimeState.confirmResolver = null;
+  }
+}
+
+function askConfirm(message, options = {}) {
+  ensureUiLayer();
+  const root = document.getElementById('confirmModal');
+  const titleEl = document.getElementById('confirmTitle');
+  const messageEl = document.getElementById('confirmMessage');
+  const confirmBtn = root?.querySelector('[data-action="confirm"]');
+  const cancelBtn = root?.querySelector('[data-action="cancel"]');
+  if (!root || !titleEl || !messageEl || !confirmBtn || !cancelBtn) {
+    return Promise.resolve(window.confirm(message));
+  }
+
+  titleEl.textContent = options.title || 'Confirmar accion';
+  messageEl.textContent = String(message || '');
+  confirmBtn.textContent = options.confirmText || 'Confirmar';
+  confirmBtn.classList.toggle('danger', options.danger !== false);
+  root.classList.remove('hidden');
+  confirmBtn.focus();
+
+  return new Promise((resolve) => {
+    runtimeState.confirmResolver = resolve;
+  });
+}
 
 // ---- Helpers de datos ----
 
@@ -344,94 +533,103 @@ function refreshIngredientRowsOptions() {
 }
 
 /** Cambia estado y ejecuta automatizacion de stock segun transicion */
-async function changePreparadoStatus(id, nextStatus) {
-  const item = state.items.find((p) => normalizeId(p.id) === normalizeId(id));
-  if (!item) return;
-  if (!STATUS_FLOW.includes(nextStatus)) return;
-  if (item.status === nextStatus) return;
+async function changePreparadoStatus(id, nextStatus, triggerButton = null) {
+  const execute = async () => {
+    const item = state.items.find((p) => normalizeId(p.id) === normalizeId(id));
+    if (!item) return;
+    if (!STATUS_FLOW.includes(nextStatus)) return;
+    if (item.status === nextStatus) return;
 
-  const requiereAplicar = STOCK_IMPACT_STATUSES.has(nextStatus) && !Boolean(item.stockAplicado);
-  const requiereRevertir = !STOCK_IMPACT_STATUSES.has(nextStatus) && Boolean(item.stockAplicado);
-  let reversionEntries = [];
-  let aplicacionEntries = [];
+    const requiereAplicar = STOCK_IMPACT_STATUSES.has(nextStatus) && !Boolean(item.stockAplicado);
+    const requiereRevertir = !STOCK_IMPACT_STATUSES.has(nextStatus) && Boolean(item.stockAplicado);
+    let reversionEntries = [];
+    let aplicacionEntries = [];
 
-  if (requiereRevertir) {
-    const reversion = await revertStockForPreparado(item, {
-      motivo: `Reversion por cambio de estado ${item.status} -> ${nextStatus}`
-    });
-    if (!reversion.ok) {
-      alert(reversion.error || 'No se pudo devolver stock al volver a Pendiente.');
-      return;
+    if (requiereRevertir) {
+      const reversion = await revertStockForPreparado(item, {
+        motivo: `Reversion por cambio de estado ${item.status} -> ${nextStatus}`
+      });
+      if (!reversion.ok) {
+        alert(reversion.error || 'No se pudo devolver stock al volver a Pendiente.');
+        return;
+      }
+      reversionEntries = reversion.entries || [];
     }
-    reversionEntries = reversion.entries || [];
-  }
-
-  if (requiereAplicar) {
-    const aplicacion = await applyStockForPreparado(item, {
-      motivo: `Descuento por cambio de estado ${item.status} -> ${nextStatus}`
-    });
-    if (!aplicacion.ok) {
-      alert(aplicacion.error || 'No se pudo descontar stock en el cambio de estado.');
-      return;
-    }
-    aplicacionEntries = aplicacion.entries || [];
-  }
-
-  const stockAplicadoFinal = STOCK_IMPACT_STATUSES.has(nextStatus);
-  const { error } = await supabaseClient
-    .from('preparados')
-    .update({
-      estado: nextStatus,
-      stock_aplicado: stockAplicadoFinal
-    })
-    .eq('id', id);
-
-  if (error) {
-    console.error('Error actualizando estado en Supabase:', error);
 
     if (requiereAplicar) {
-      if (aplicacionEntries.length) {
-        await processStockEntries({
-          preparado: item,
-          entries: aplicacionEntries,
-          tipoMovimiento: MOVIMIENTO_STOCK_REVERSION,
-          stockDeltaSign: 1,
-          motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`,
-          source: 'rollback'
-        });
-      } else {
-        await revertStockForPreparado(item, {
-          motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`
-        });
+      const aplicacion = await applyStockForPreparado(item, {
+        motivo: `Descuento por cambio de estado ${item.status} -> ${nextStatus}`
+      });
+      if (!aplicacion.ok) {
+        alert(aplicacion.error || 'No se pudo descontar stock en el cambio de estado.');
+        return;
       }
-    } else if (requiereRevertir) {
-      if (reversionEntries.length) {
-        await processStockEntries({
-          preparado: item,
-          entries: reversionEntries,
-          tipoMovimiento: MOVIMIENTO_STOCK_CONSUMO,
-          stockDeltaSign: -1,
-          motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`,
-          source: 'rollback'
-        });
-      } else {
-        await applyStockForPreparado(item, {
-          motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`
-        });
-      }
+      aplicacionEntries = aplicacion.entries || [];
     }
 
-    alert('No se pudo actualizar el estado.');
-    return;
-  }
+    const stockAplicadoFinal = STOCK_IMPACT_STATUSES.has(nextStatus);
+    const { error } = await supabaseClient
+      .from('preparados')
+      .update({
+        estado: nextStatus,
+        stock_aplicado: stockAplicadoFinal
+      })
+      .eq('id', id);
 
-  item.status = nextStatus;
-  item.stockAplicado = stockAplicadoFinal;
-  renderList(searchInput?.value || '');
+    if (error) {
+      console.error('Error actualizando estado en Supabase:', error);
+
+      if (requiereAplicar) {
+        if (aplicacionEntries.length) {
+          await processStockEntries({
+            preparado: item,
+            entries: aplicacionEntries,
+            tipoMovimiento: MOVIMIENTO_STOCK_REVERSION,
+            stockDeltaSign: 1,
+            motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`,
+            source: 'rollback'
+          });
+        } else {
+          await revertStockForPreparado(item, {
+            motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`
+          });
+        }
+      } else if (requiereRevertir) {
+        if (reversionEntries.length) {
+          await processStockEntries({
+            preparado: item,
+            entries: reversionEntries,
+            tipoMovimiento: MOVIMIENTO_STOCK_CONSUMO,
+            stockDeltaSign: -1,
+            motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`,
+            source: 'rollback'
+          });
+        } else {
+          await applyStockForPreparado(item, {
+            motivo: `Rollback por fallo guardando estado ${item.status} -> ${nextStatus}`
+          });
+        }
+      }
+
+      alert('No se pudo actualizar el estado.');
+      return;
+    }
+
+    item.status = nextStatus;
+    item.stockAplicado = stockAplicadoFinal;
+    upsertPreparadoInView(item);
+    markCacheFresh('preparados');
+    markCacheFresh('stock');
+  };
+
+  if (triggerButton) {
+    return runWithButtonLoading(triggerButton, execute, 'Actualizando...');
+  }
+  return execute();
 }
 
 /** Avanza el estado de un preparado respetando el flujo definido */
-async function advanceStatus(id) {
+async function advanceStatus(id, triggerButton = null) {
   const item = state.items.find((p) => normalizeId(p.id) === normalizeId(id));
   if (!item) return;
 
@@ -439,7 +637,7 @@ async function advanceStatus(id) {
   if (currentIndex >= STATUS_FLOW.length - 1) return;
 
   const nextStatus = STATUS_FLOW[currentIndex + 1];
-  await changePreparadoStatus(id, nextStatus);
+  await changePreparadoStatus(id, nextStatus, triggerButton);
 }
 
 /** Filtra por cualquier campo textual usando el termino ingresado */
@@ -814,9 +1012,15 @@ function applyLocalMateriaStocks(nextStocksById) {
     };
   });
 
-  renderStockList(stockSearch?.value || '');
+  nextStocksById.forEach((_, materiaId) => {
+    const updatedItem = state.stockItems.find((item) => normalizeId(item.id) === normalizeId(materiaId));
+    if (updatedItem) upsertStockInView(updatedItem);
+  });
   renderDashboardAlerts();
   refreshIngredientRowsOptions();
+  syncFormulasWithStockState();
+  markCacheFresh('stock');
+  markCacheFresh('formulas');
 }
 
 async function processStockEntries({
@@ -1074,7 +1278,99 @@ function renderDashboardAlerts() {
 }
 
 /** Renderiza la lista de preparados aplicando filtro de busqueda */
+function buildPreparadoCard(item) {
+  const card = document.createElement('article');
+  card.className = 'prep-card';
+  card.dataset.status = item.status;
+  card.dataset.preparadoId = String(item.id);
+
+  const nextIndex = STATUS_FLOW.indexOf(item.status) + 1;
+  const nextLabel = STATUS_FLOW[nextIndex] ? `Avanzar a ${STATUS_FLOW[nextIndex]}` : 'Estado final';
+
+  card.innerHTML = `
+    <div class="prep-card-head">
+      <div class="prep-title-wrap">
+        <span class="pill status status-${item.status.toLowerCase()}">${item.status}</span>
+        <span class="prep-client">${uiIcon('user', 'ui-icon-md')}${item.cliente}</span>
+      </div>
+      <div class="prep-chips">
+        <span class="badge prep-chip">${uiIcon('flask', 'ui-icon-xs')}${item.formula}</span>
+        <span class="badge prep-chip">${item.formaFarmaceutica}</span>
+      </div>
+    </div>
+    <div class="prep-metrics">
+      <div class="metric">
+        <span class="metric-label">Cantidad</span>
+        <strong>${formatCantidad(item)}</strong>
+      </div>
+      <div class="metric">
+        <span class="metric-label">${uiIcon('calendar', 'ui-icon-xs')}Carga</span>
+        <strong>${item.fechaCarga}</strong>
+      </div>
+      <div class="metric">
+        <span class="metric-label">${uiIcon('calendar', 'ui-icon-xs')}Entrega</span>
+        <strong>${item.diaEntrega}</strong>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Costo</span>
+        <strong>$${(item.costo ?? 0).toFixed ? item.costo.toFixed(2) : Number(item.costo).toFixed(2)}</strong>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Recargo</span>
+        <strong>${(item.recargo ?? 0)}%</strong>
+      </div>
+      <div class="metric metric-highlight">
+        <span class="metric-label">${uiIcon('money', 'ui-icon-xs')}Precio final</span>
+        <strong>$${(item.precioFinal ?? 0).toFixed ? item.precioFinal.toFixed(2) : Number(item.precioFinal).toFixed(2)}</strong>
+      </div>
+    </div>
+    <p class="meta prep-notes">Notas: ${item.observaciones || 'Sin observaciones'}</p>
+    <div class="prep-card-footer">
+      <div class="meta prep-pdf">
+        PDF: ${item.pdf && item.pdf.url
+      ? `<span>${item.pdf.name}</span> &middot; <a class="pdf-link" href="${item.pdf.url}" target="_blank" rel="noopener">Ver receta</a> &middot; <a class="pdf-link" href="${item.pdf.url}" download="${sanitizeStorageFileName(item.pdf.name)}">Descargar receta</a> &middot; <button type="button" class="pdf-link pdf-delete-link" data-action="delete-receta">Eliminar receta</button>`
+      : 'No adjuntado'}
+      </div>
+
+      <div class="actions">
+        <button class="btn primary" data-action="advance" ${item.status === 'Entregado' ? 'disabled' : ''}>${nextLabel}</button>
+        ${item.status !== 'Pendiente' ? '<button class="btn secondary" data-action="to-pending">Volver a Pendiente</button>' : ''}
+        <button class="btn secondary" data-action="edit">Editar</button>
+        <button class="btn danger" data-action="delete">Eliminar</button>
+      </div>
+    </div>
+  `;
+
+  const advanceBtn = card.querySelector('[data-action="advance"]');
+  if (advanceBtn) {
+    advanceBtn.addEventListener('click', () => advanceStatus(item.id, advanceBtn));
+  }
+
+  const editBtn = card.querySelector('[data-action="edit"]');
+  if (editBtn) {
+    editBtn.addEventListener('click', () => editPreparado(item.id));
+  }
+
+  const toPendingBtn = card.querySelector('[data-action="to-pending"]');
+  if (toPendingBtn) {
+    toPendingBtn.addEventListener('click', () => changePreparadoStatus(item.id, 'Pendiente', toPendingBtn));
+  }
+
+  const deleteBtn = card.querySelector('[data-action="delete"]');
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', () => deletePreparado(item.id, deleteBtn));
+  }
+
+  const deleteRecetaBtn = card.querySelector('[data-action="delete-receta"]');
+  if (deleteRecetaBtn) {
+    deleteRecetaBtn.addEventListener('click', () => deletePreparadoReceta(item.id, deleteRecetaBtn));
+  }
+
+  return card;
+}
+
 function renderList(term = '') {
+  if (!listContainer) return;
   listContainer.innerHTML = '';
   const filtered = state.items
     .filter((item) => matchesSearch(item, term))
@@ -1085,97 +1381,51 @@ function renderList(term = '') {
     return;
   }
 
+  const fragment = document.createDocumentFragment();
   filtered.forEach((item) => {
-    const card = document.createElement('article');
-    card.className = 'prep-card';
-    card.dataset.status = item.status;
-
-    const nextIndex = STATUS_FLOW.indexOf(item.status) + 1;
-    const nextLabel = STATUS_FLOW[nextIndex] ? `Avanzar a ${STATUS_FLOW[nextIndex]}` : 'Estado final';
-
-    card.innerHTML = `
-      <div class="prep-card-head">
-        <div class="prep-title-wrap">
-          <span class="pill status status-${item.status.toLowerCase()}">${item.status}</span>
-          <span class="prep-client">${uiIcon('user', 'ui-icon-md')}${item.cliente}</span>
-        </div>
-        <div class="prep-chips">
-          <span class="badge prep-chip">${uiIcon('flask', 'ui-icon-xs')}${item.formula}</span>
-          <span class="badge prep-chip">${item.formaFarmaceutica}</span>
-        </div>
-      </div>
-      <div class="prep-metrics">
-        <div class="metric">
-          <span class="metric-label">Cantidad</span>
-          <strong>${formatCantidad(item)}</strong>
-        </div>
-        <div class="metric">
-          <span class="metric-label">${uiIcon('calendar', 'ui-icon-xs')}Carga</span>
-          <strong>${item.fechaCarga}</strong>
-        </div>
-        <div class="metric">
-          <span class="metric-label">${uiIcon('calendar', 'ui-icon-xs')}Entrega</span>
-          <strong>${item.diaEntrega}</strong>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Costo</span>
-          <strong>$${(item.costo ?? 0).toFixed ? item.costo.toFixed(2) : Number(item.costo).toFixed(2)}</strong>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Recargo</span>
-          <strong>${(item.recargo ?? 0)}%</strong>
-        </div>
-        <div class="metric metric-highlight">
-          <span class="metric-label">${uiIcon('money', 'ui-icon-xs')}Precio final</span>
-          <strong>$${(item.precioFinal ?? 0).toFixed ? item.precioFinal.toFixed(2) : Number(item.precioFinal).toFixed(2)}</strong>
-        </div>
-      </div>
-      <p class="meta prep-notes">Notas: ${item.observaciones || 'Sin observaciones'}</p>
-      <div class="prep-card-footer">
-        <div class="meta prep-pdf">
-          PDF: ${item.pdf && item.pdf.url
-      ? `<span>${item.pdf.name}</span> &middot; <a class="pdf-link" href="${item.pdf.url}" target="_blank" rel="noopener">Ver receta</a> &middot; <a class="pdf-link" href="${item.pdf.url}" download="${sanitizeStorageFileName(item.pdf.name)}">Descargar receta</a> &middot; <button type="button" class="pdf-link pdf-delete-link" data-action="delete-receta">Eliminar receta</button>`
-      : 'No adjuntado'}
-        </div>
-
-        <div class="actions">
-          <button class="btn primary" data-action="advance" ${item.status === 'Entregado' ? 'disabled' : ''}>${nextLabel}</button>
-          ${item.status !== 'Pendiente' ? '<button class="btn secondary" data-action="to-pending">Volver a Pendiente</button>' : ''}
-          <button class="btn secondary" data-action="edit">Editar</button>
-          <button class="btn danger" data-action="delete">Eliminar</button>
-        </div>
-      </div>
-    `;
-
-    const advanceBtn = card.querySelector('[data-action="advance"]');
-if (advanceBtn) {
-  advanceBtn.addEventListener('click', () => advanceStatus(item.id));
-}
-
-const editBtn = card.querySelector('[data-action="edit"]');
-if (editBtn) {
-  editBtn.addEventListener('click', () => editPreparado(item.id));
-}
-
-const toPendingBtn = card.querySelector('[data-action="to-pending"]');
-if (toPendingBtn) {
-  toPendingBtn.addEventListener('click', () => changePreparadoStatus(item.id, 'Pendiente'));
-}
-
-const deleteBtn = card.querySelector('[data-action="delete"]');
-if (deleteBtn) {
-  deleteBtn.addEventListener('click', () => deletePreparado(item.id));
-}
-
-const deleteRecetaBtn = card.querySelector('[data-action="delete-receta"]');
-if (deleteRecetaBtn) {
-  deleteRecetaBtn.addEventListener('click', () => deletePreparadoReceta(item.id));
-}
-
-    listContainer.appendChild(card);
+    fragment.appendChild(buildPreparadoCard(item));
   });
-  function editPreparado(id) {
-  const item = state.items.find(item => item.id === id);
+
+  listContainer.appendChild(fragment);
+}
+
+function upsertPreparadoInView(item) {
+  if (!listContainer) return;
+  const currentFilter = searchInput?.value || '';
+  if (!matchesSearch(item, currentFilter)) {
+    const existing = listContainer.querySelector(`.prep-card[data-preparado-id="${item.id}"]`);
+    if (existing) existing.remove();
+    if (!listContainer.children.length) listContainer.innerHTML = renderEmptyState();
+    return;
+  }
+
+  const newCard = buildPreparadoCard(item);
+  const existing = listContainer.querySelector(`.prep-card[data-preparado-id="${item.id}"]`);
+  if (existing) {
+    existing.replaceWith(newCard);
+    return;
+  }
+
+  if (!listContainer.children.length || listContainer.querySelector('.empty-state')) {
+    listContainer.innerHTML = '';
+    listContainer.appendChild(newCard);
+    return;
+  }
+
+  listContainer.prepend(newCard);
+}
+
+function removePreparadoFromView(id) {
+  if (!listContainer) return;
+  const target = listContainer.querySelector(`.prep-card[data-preparado-id="${id}"]`);
+  if (target) target.remove();
+  if (!listContainer.children.length) {
+    listContainer.innerHTML = renderEmptyState();
+  }
+}
+
+function editPreparado(id) {
+  const item = state.items.find((entry) => normalizeId(entry.id) === normalizeId(id));
   if (!item) return;
 
   state.editingId = id;
@@ -1193,116 +1443,200 @@ if (deleteRecetaBtn) {
 
   form.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
-}
 
-async function deletePreparadoReceta(id) {
-  const item = state.items.find((prep) => normalizeId(prep.id) === normalizeId(id));
-  const recetaPath = item?.pdf?.path || '';
+async function deletePreparadoReceta(id, triggerButton = null) {
+  const execute = async () => {
+    const item = state.items.find((prep) => normalizeId(prep.id) === normalizeId(id));
+    const recetaPath = item?.pdf?.path || '';
 
-  if (!item || !recetaPath) {
-    alert('Este preparado no tiene receta adjunta.');
-    return;
-  }
-
-  const confirmar = confirm('Seguro que queres eliminar la receta adjunta?');
-  if (!confirmar) return;
-
-  const storageResult = await removeRecetaFromStorage(recetaPath);
-  if (!storageResult.ok) {
-    console.error('No se pudo eliminar la receta del storage:', storageResult.error);
-    alert('No se pudo eliminar la receta del storage. Intenta nuevamente.');
-    return;
-  }
-
-  const { error } = await supabaseClient
-    .from('preparados')
-    .update({
-      archivo_receta_nombre: null,
-      archivo_receta_path: null,
-      archivo_receta_url: null
-    })
-    .eq('id', id);
-
-  if (error) {
-    console.error('No se pudo limpiar la receta en la base de datos:', error);
-    alert('La receta se elimino del storage, pero no se pudo actualizar el preparado en la base de datos.');
-    return;
-  }
-
-  state.items = state.items.map((prep) => {
-    if (normalizeId(prep.id) !== normalizeId(id)) return prep;
-    return { ...prep, pdf: null };
-  });
-
-  renderList(searchInput?.value || '');
-  alert('Receta eliminada correctamente.');
-}
-
-async function deletePreparado(id) {
-  const item = state.items.find((prep) => normalizeId(prep.id) === normalizeId(id));
-  const recetaPath = item?.pdf?.path || '';
-  const confirmar = confirm('Quieres eliminar este preparado?');
-  if (!confirmar) return;
-
-  let reversionAplicada = false;
-  let reversionEntries = [];
-  if (item?.stockAplicado) {
-    const reversion = await revertStockForPreparado(item, {
-      motivo: 'Reversion por eliminacion de preparado'
-    });
-
-    if (!reversion.ok) {
-      alert(reversion.error || 'No se pudo devolver stock antes de eliminar el preparado.');
+    if (!item || !recetaPath) {
+      alert('Este preparado no tiene receta adjunta.');
       return;
     }
 
-    reversionAplicada = true;
-    reversionEntries = reversion.entries || [];
+    const confirmar = await askConfirm('Seguro que queres eliminar la receta adjunta?', {
+      title: 'Eliminar receta',
+      confirmText: 'Eliminar',
+      danger: true
+    });
+    if (!confirmar) return;
+
+    const storageResult = await removeRecetaFromStorage(recetaPath);
+    if (!storageResult.ok) {
+      console.error('No se pudo eliminar la receta del storage:', storageResult.error);
+      alert('No se pudo eliminar la receta del storage. Intenta nuevamente.');
+      return;
+    }
+
+    const { error } = await supabaseClient
+      .from('preparados')
+      .update({
+        archivo_receta_nombre: null,
+        archivo_receta_path: null,
+        archivo_receta_url: null
+      })
+      .eq('id', id);
+
+    if (error) {
+      console.error('No se pudo limpiar la receta en la base de datos:', error);
+      alert('La receta se elimino del storage, pero no se pudo actualizar el preparado en la base de datos.');
+      return;
+    }
+
+    state.items = state.items.map((prep) => {
+      if (normalizeId(prep.id) !== normalizeId(id)) return prep;
+      return { ...prep, pdf: null };
+    });
+
+    const updated = state.items.find((prep) => normalizeId(prep.id) === normalizeId(id));
+    if (updated) upsertPreparadoInView(updated);
+    markCacheFresh('preparados');
+    alert('Receta eliminada correctamente.');
+  };
+
+  if (triggerButton) {
+    return runWithButtonLoading(triggerButton, execute, 'Eliminando...');
   }
+  return execute();
+}
 
-  const { error } = await supabaseClient
-    .from('preparados')
-    .delete()
-    .eq('id', id);
+async function deletePreparado(id, triggerButton = null) {
+  const execute = async () => {
+    const item = state.items.find((prep) => normalizeId(prep.id) === normalizeId(id));
+    const recetaPath = item?.pdf?.path || '';
+    const confirmar = await askConfirm('Quieres eliminar este preparado?', {
+      title: 'Eliminar preparado',
+      confirmText: 'Eliminar',
+      danger: true
+    });
+    if (!confirmar) return;
 
-  if (error) {
-    console.error('Error eliminando en Supabase:', error);
+    let reversionAplicada = false;
+    let reversionEntries = [];
+    if (item?.stockAplicado) {
+      const reversion = await revertStockForPreparado(item, {
+        motivo: 'Reversion por eliminacion de preparado'
+      });
 
-    if (reversionAplicada && item) {
-      if (reversionEntries.length) {
-        await processStockEntries({
-          preparado: item,
-          entries: reversionEntries,
-          tipoMovimiento: MOVIMIENTO_STOCK_CONSUMO,
-          stockDeltaSign: -1,
-          motivo: 'Rollback por fallo al eliminar preparado',
-          source: 'rollback'
-        });
-      } else {
-        await applyStockForPreparado(item, {
-          motivo: 'Rollback por fallo al eliminar preparado'
-        });
+      if (!reversion.ok) {
+        alert(reversion.error || 'No se pudo devolver stock antes de eliminar el preparado.');
+        return;
+      }
+
+      reversionAplicada = true;
+      reversionEntries = reversion.entries || [];
+    }
+
+    const { error } = await supabaseClient
+      .from('preparados')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      console.error('Error eliminando en Supabase:', error);
+
+      if (reversionAplicada && item) {
+        if (reversionEntries.length) {
+          await processStockEntries({
+            preparado: item,
+            entries: reversionEntries,
+            tipoMovimiento: MOVIMIENTO_STOCK_CONSUMO,
+            stockDeltaSign: -1,
+            motivo: 'Rollback por fallo al eliminar preparado',
+            source: 'rollback'
+          });
+        } else {
+          await applyStockForPreparado(item, {
+            motivo: 'Rollback por fallo al eliminar preparado'
+          });
+        }
+      }
+
+      alert('No se pudo eliminar el preparado.');
+      return;
+    }
+
+    let recetaDeleteWarning = '';
+    if (recetaPath) {
+      const recetaDeleteResult = await removeRecetaFromStorage(recetaPath);
+      if (!recetaDeleteResult.ok) {
+        console.error('No se pudo eliminar la receta del storage:', recetaDeleteResult.error);
+        recetaDeleteWarning = ' Se elimino el preparado, pero no se pudo eliminar la receta del storage.';
       }
     }
 
-    alert('No se pudo eliminar el preparado.');
-    return;
-  }
+    state.items = state.items.filter((prep) => normalizeId(prep.id) !== normalizeId(id));
+    removePreparadoFromView(id);
+    markCacheFresh('preparados');
+    alert(`Preparado eliminado correctamente.${recetaDeleteWarning}`);
+  };
 
-  let recetaDeleteWarning = '';
-  if (recetaPath) {
-    const recetaDeleteResult = await removeRecetaFromStorage(recetaPath);
-    if (!recetaDeleteResult.ok) {
-      console.error('No se pudo eliminar la receta del storage:', recetaDeleteResult.error);
-      recetaDeleteWarning = ' Se elimino el preparado, pero no se pudo eliminar la receta del storage.';
-    }
+  if (triggerButton) {
+    return runWithButtonLoading(triggerButton, execute, 'Eliminando...');
   }
-
-  state.items = state.items.filter((prep) => normalizeId(prep.id) !== normalizeId(id));
-  renderList(searchInput?.value || '');
-  alert(`Preparado eliminado correctamente.${recetaDeleteWarning}`);
+  return execute();
 }
 
+
+function buildStockCard(item) {
+  const lowStock = isStockBelowMinimum(item);
+  const expired = isStockExpired(item.fecha_vencimiento);
+  const expiringSoon = !expired && isStockExpiringSoon(item.fecha_vencimiento, 30);
+  const stockActual = Number(item.stock_actual ?? 0);
+  const stockActualText = Number.isFinite(stockActual)
+    ? stockActual.toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 2 })
+    : String(item.stock_actual ?? 0);
+  const costoUnitario = Number(item.costo_unitario ?? 0);
+  const costoUnitarioText = Number.isFinite(costoUnitario)
+    ? costoUnitario.toFixed(2)
+    : '0.00';
+
+  const alerts = [];
+  if (lowStock) alerts.push('<span class="stock-flag stock-flag-low">Stock bajo</span>');
+  if (expired) {
+    alerts.push('<span class="stock-flag stock-flag-expired">Vencido</span>');
+  } else if (expiringSoon) {
+    alerts.push('<span class="stock-flag stock-flag-soon">Pr&oacute;ximo a vencer</span>');
+  }
+
+  const alertsBlock = alerts.length ? `<div class="stock-alerts">${alerts.join('')}</div>` : '';
+
+  const card = document.createElement('article');
+  card.className = 'stock-card';
+  card.dataset.stockId = String(item.id);
+  card.innerHTML = `
+    <div class="row stock-card-head">
+      <div class="stock-heading">
+        <div class="stock-title">${item.nombre}</div>
+        <div class="stock-lot">Lote ${item.lote || '-'}</div>
+      </div>
+      <div class="stock-actions">
+        <button type="button" class="btn secondary edit-stock-btn" data-id="${item.id}">Editar</button>
+        <button type="button" class="btn danger delete-stock-btn" data-id="${item.id}">Eliminar</button>
+      </div>
+    </div>
+    <div class="stock-groups">
+      <div class="stock-group">
+        <span class="stock-group-label">Stock y costo</span>
+        <span class="stock-value">${stockActualText} ${item.unidad_base || ''}</span>
+        <span class="stock-meta">Costo unitario: <strong>$${costoUnitarioText}</strong></span>
+      </div>
+      <div class="stock-group">
+        <span class="stock-group-label">Proveedor y vencimiento</span>
+        <span class="stock-meta">Proveedor: <strong>${item.proveedor || '-'}</strong></span>
+        <span class="stock-meta">Vence: <strong>${item.fecha_vencimiento || '-'}</strong></span>
+      </div>
+    </div>
+    ${alertsBlock}
+  `;
+
+  const editBtn = card.querySelector('.edit-stock-btn');
+  const deleteBtn = card.querySelector('.delete-stock-btn');
+  if (editBtn) editBtn.addEventListener('click', () => handleEditStock(item.id, editBtn));
+  if (deleteBtn) deleteBtn.addEventListener('click', () => handleDeleteStock(item.id, deleteBtn));
+
+  return card;
+}
 
 function renderStockList(filter = '') {
   if (!stockList) return;
@@ -1329,60 +1663,50 @@ function renderStockList(filter = '') {
     return;
   }
 
-  stockList.innerHTML = filtered.map(item => {
-    const lowStock = isStockBelowMinimum(item);
-    const expired = isStockExpired(item.fecha_vencimiento);
-    const expiringSoon = !expired && isStockExpiringSoon(item.fecha_vencimiento, 30);
+  stockList.innerHTML = '';
+  const fragment = document.createDocumentFragment();
+  filtered.forEach((item) => fragment.appendChild(buildStockCard(item)));
+  stockList.appendChild(fragment);
+}
 
-    const alerts = [];
-    if (lowStock) alerts.push('<span class="stock-flag stock-flag-low">Stock bajo</span>');
-    if (expired) {
-      alerts.push('<span class="stock-flag stock-flag-expired">Vencido</span>');
-    } else if (expiringSoon) {
-      alerts.push('<span class="stock-flag stock-flag-soon">Próximo a vencer</span>');
-    }
+function upsertStockInView(item) {
+  if (!stockList) return;
+  const term = String(stockSearch?.value || '').toLowerCase().trim();
+  const haystack = [item.nombre, item.lote, item.proveedor, item.fecha_vencimiento, item.unidad_base]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  const matches = !term || haystack.includes(term);
+  const existing = stockList.querySelector(`.stock-card[data-stock-id="${item.id}"]`);
 
-    const alertsBlock = alerts.length ? `<div class="stock-alerts">${alerts.join('')}</div>` : '';
+  if (!matches) {
+    if (existing) existing.remove();
+    if (!stockList.children.length) stockList.innerHTML = renderEmptyState();
+    return;
+  }
 
-    return `
-      <article class="stock-card">
-        <div class="row">
-          <div>
-            <div class="stock-title">${item.nombre}</div>
-            <div class="stock-meta">Lote: ${item.lote || '-'}</div>
-          </div>
-          <div class="stock-actions">
-            <button type="button" class="btn secondary edit-stock-btn" data-id="${item.id}">Editar</button>
-            <button type="button" class="btn danger delete-stock-btn" data-id="${item.id}">Eliminar</button>
-          </div>
-        </div>
-        <div class="row stock-row">
-          <span class="stock-meta">Cantidad: <strong>${item.stock_actual} ${item.unidad_base}</strong></span>
-          <span class="stock-meta">Costo unitario: <strong>$${Number(item.costo_unitario ?? 0).toFixed(2)}</strong></span>
-          <span class="stock-meta">Proveedor: ${item.proveedor || '-'}</span>
-          <span class="stock-meta">Vence: ${item.fecha_vencimiento || '-'}</span>
-        </div>
-        ${alertsBlock}
-      </article>
-    `;
-  }).join('');
+  const newCard = buildStockCard(item);
+  if (existing) {
+    existing.replaceWith(newCard);
+    return;
+  }
 
-  const deleteButtons = stockList.querySelectorAll('.delete-stock-btn');
-  const editButtons = stockList.querySelectorAll('.edit-stock-btn');
+  if (!stockList.children.length || stockList.querySelector('.empty-state')) {
+    stockList.innerHTML = '';
+    stockList.appendChild(newCard);
+    return;
+  }
 
-editButtons.forEach(button => {
-  button.addEventListener('click', () => {
-    const id = button.dataset.id;
-    handleEditStock(id);
-  });
-});
+  stockList.prepend(newCard);
+}
 
-  deleteButtons.forEach(button => {
-    button.addEventListener('click', () => {
-      const id = button.dataset.id;
-      handleDeleteStock(id);
-    });
-  });
+function removeStockFromView(id) {
+  if (!stockList) return;
+  const target = stockList.querySelector(`.stock-card[data-stock-id="${id}"]`);
+  if (target) target.remove();
+  if (!stockList.children.length) {
+    stockList.innerHTML = renderEmptyState();
+  }
 }
 
 /** Renderiza lista de formulas con acciones de editar y eliminar */
@@ -1431,8 +1755,10 @@ function renderFormulaList(term = '') {
       </div>
     `;
 
-    card.querySelector('[data-action="edit"]').addEventListener('click', () => startEditFormula(item.id));
-    card.querySelector('[data-action="delete"]').addEventListener('click', () => deleteFormula(item.id));
+    const editFormulaBtn = card.querySelector('[data-action="edit"]');
+    const deleteFormulaBtn = card.querySelector('[data-action="delete"]');
+    editFormulaBtn?.addEventListener('click', () => startEditFormula(item.id));
+    deleteFormulaBtn?.addEventListener('click', () => deleteFormula(item.id, deleteFormulaBtn));
 
     formulaList.appendChild(card);
   });
@@ -1769,15 +2095,22 @@ async function handleSubmit(event) {
   }
 
   state.editingId = null;
-  renderList(searchInput?.value || '');
+  const savedPreparedId = editingId || savedRow?.id || newItem.id;
+  const finalItem = state.items.find((entry) => normalizeId(entry.id) === normalizeId(savedPreparedId));
+  if (finalItem) upsertPreparadoInView(finalItem);
+  markCacheFresh('preparados');
   form.reset();
   autofillCostoDesdeFormula('');
   alert(editingId ? 'Preparado actualizado correctamente.' : 'Preparado guardado correctamente.');
 }
 
+const debouncedPreparedSearch = debounce((value) => renderList(value));
+const debouncedFormulaSearch = debounce((value) => renderFormulaList(value));
+const debouncedStockSearch = debounce((value) => renderStockList(value));
+
 /** Escucha el input de busqueda para filtrar al vuelo */
 function handleSearch(event) {
-  renderList(event.target.value);
+  debouncedPreparedSearch(event.target.value);
 }
 
 /** Recalcula y actualiza el campo de precio final cuando cambia costo o recargo */
@@ -1848,7 +2181,9 @@ async function handleFormulaSubmit(event) {
   }
 
   const isEditing = editingFormulaId !== null && editingFormulaId !== undefined;
+  const previousFormula = isEditing ? findFormulaById(editingFormulaId) : null;
   let formulaId = editingFormulaId;
+  let savedFormulaRow = null;
 
   if (isEditing) {
     const { data, error } = await supabaseClient
@@ -1864,6 +2199,7 @@ async function handleFormulaSubmit(event) {
       return;
     }
 
+    savedFormulaRow = data;
     formulaId = data?.id ?? formulaId;
 
     const { error: deleteError } = await supabaseClient
@@ -1889,6 +2225,7 @@ async function handleFormulaSubmit(event) {
       return;
     }
 
+    savedFormulaRow = data;
     formulaId = data?.id;
   }
 
@@ -1913,21 +2250,59 @@ async function handleFormulaSubmit(event) {
     if (insertComponentesError) {
       console.error('Error guardando componentes:', insertComponentesError);
       alert('La formula se guardo pero hubo un problema con sus componentes.');
-      await loadFormulasDesdeSupabase();
+      markCacheDirty('formulas');
+      await loadFormulasDesdeSupabase({ force: true });
       return;
     }
   }
 
-  await loadFormulasDesdeSupabase();
+  const materiaMap = buildMateriaMapFromState();
+  const normalizedIngredientes = ingredientes.map((ing, index) => {
+    const materiaId = String(ing.materia_prima_id || '');
+    const materia = materiaMap.get(materiaId);
+    return {
+      id: `${formulaId}-${index}`,
+      formula_id: formulaId,
+      materia_prima_id: ing.materia_prima_id,
+      nombre: materia?.nombre || ing.nombre || `Materia #${ing.materia_prima_id}`,
+      cantidad: Number(ing.cantidad) || 0,
+      unidad: ing.unidad || materia?.unidad_base || '',
+      observaciones: ing.observaciones || '',
+      costo_unitario: materia ? Number(materia.costo_unitario) || 0 : Number(ing.costo_unitario) || 0
+    };
+  });
+
+  const formulaState = {
+    id: formulaId,
+    nombre: payload.nombre,
+    forma: payload.forma_farmaceutica,
+    presentacion: payload.presentacion_estandar,
+    ingredientes: normalizedIngredientes,
+    costoEstimado: calcFormulaCost(normalizedIngredientes, materiaMap),
+    createdAt: savedFormulaRow?.created_at
+      ? new Date(savedFormulaRow.created_at).getTime()
+      : previousFormula?.createdAt || Date.now()
+  };
+
+  if (isEditing) {
+    state.formulas = state.formulas.map((formula) => (
+      normalizeId(formula.id) === normalizeId(formulaId) ? formulaState : formula
+    ));
+  } else {
+    state.formulas.unshift(formulaState);
+  }
+
+  markCacheFresh('formulas');
   resetFormulaForm();
   renderFormulaList(formulaSearch?.value || '');
   refreshFormulaOptions();
+  if (formulaInput?.value?.trim()) autofillCostoDesdeFormula(formulaInput.value);
   alert('Formula guardada correctamente.');
 }
 
 /** Busca en formulas */
 function handleFormulaSearch(event) {
-  renderFormulaList(event.target.value);
+  debouncedFormulaSearch(event.target.value);
 }
 
 /** Inicia edicion rellenando el formulario */
@@ -1959,37 +2334,49 @@ function startEditFormula(id) {
 }
 
 /** Elimina una formula por id */
-async function deleteFormula(id) {
-  const confirmar = confirm('¿Eliminar esta formula y sus componentes?');
-  if (!confirmar) return;
+async function deleteFormula(id, triggerButton = null) {
+  const execute = async () => {
+    const confirmar = await askConfirm('Eliminar esta formula y sus componentes?', {
+      title: 'Eliminar formula',
+      confirmText: 'Eliminar',
+      danger: true
+    });
+    if (!confirmar) return;
 
-  const { error: compError } = await supabaseClient
-    .from('formula_componentes')
-    .delete()
-    .eq('formula_id', id);
+    const { error: compError } = await supabaseClient
+      .from('formula_componentes')
+      .delete()
+      .eq('formula_id', id);
 
-  if (compError) {
-    console.error('Error eliminando componentes:', compError);
-    alert('No se pudo eliminar los componentes de la formula.');
-    return;
+    if (compError) {
+      console.error('Error eliminando componentes:', compError);
+      alert('No se pudo eliminar los componentes de la formula.');
+      return;
+    }
+
+    const { error } = await supabaseClient
+      .from('formulas')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      console.error('Error eliminando formula:', error);
+      alert('No se pudo eliminar la formula.');
+      return;
+    }
+
+    state.formulas = state.formulas.filter((f) => normalizeId(f.id) !== normalizeId(id));
+    if (normalizeId(editingFormulaId) === normalizeId(id)) resetFormulaForm();
+    renderFormulaList(formulaSearch?.value || '');
+    refreshFormulaOptions();
+    markCacheFresh('formulas');
+  };
+
+  if (triggerButton) {
+    return runWithButtonLoading(triggerButton, execute, 'Eliminando...');
   }
-
-  const { error } = await supabaseClient
-    .from('formulas')
-    .delete()
-    .eq('id', id);
-
-  if (error) {
-    console.error('Error eliminando formula:', error);
-    alert('No se pudo eliminar la formula.');
-    return;
-  }
-
-  state.formulas = state.formulas.filter((f) => normalizeId(f.id) !== normalizeId(id));
-  if (normalizeId(editingFormulaId) === normalizeId(id)) resetFormulaForm();
-  renderFormulaList(formulaSearch?.value || '');
+  return execute();
 }
-
 /** Limpia el formulario de formulas y deja una fila base de ingrediente */
 function resetFormulaForm() {
   if (!formulaForm || !ingredientsContainer) return;
@@ -2030,9 +2417,11 @@ async function handleStockSubmit(event) {
     proveedor: formData.get('proveedor')?.trim() || ''
   };
 
-  const { error } = await supabaseClient
+  const { data, error } = await supabaseClient
     .from('materias_primas')
-    .insert([nuevaMateria]);
+    .insert([nuevaMateria])
+    .select('id, nombre, unidad_base, stock_actual, stock_minimo, costo_unitario, lote, proveedor, fecha_vencimiento, created_at')
+    .single();
 
   if (error) {
     console.error('Error al guardar stock:', error);
@@ -2041,8 +2430,16 @@ async function handleStockSubmit(event) {
   }
 
   stockForm.reset();
-  await renderStockDesdeSupabase();
-  await loadFormulasDesdeSupabase();
+  if (data) {
+    state.stockItems.unshift(data);
+    upsertStockInView(data);
+  }
+  renderDashboardAlerts();
+  refreshIngredientRowsOptions();
+  syncFormulasWithStockState();
+  markCacheFresh('stock');
+  markCacheFresh('formulas');
+  alert('Stock guardado correctamente.');
 }
 
 async function handleStockEditSubmit(event) {
@@ -2060,10 +2457,12 @@ async function handleStockEditSubmit(event) {
     fecha_vencimiento: formData.get('fecha_vencimiento') || null
   };
 
-  const { error } = await supabaseClient
+  const { data, error } = await supabaseClient
     .from('materias_primas')
     .update(payload)
-    .eq('id', id);
+    .eq('id', id)
+    .select('id, nombre, unidad_base, stock_actual, stock_minimo, costo_unitario, lote, proveedor, fecha_vencimiento, created_at')
+    .single();
 
   if (error) {
     console.error('Error al actualizar:', error);
@@ -2071,35 +2470,61 @@ async function handleStockEditSubmit(event) {
     return;
   }
 
+  if (data) {
+    state.stockItems = state.stockItems.map((item) => (
+      normalizeId(item.id) === normalizeId(id) ? data : item
+    ));
+    upsertStockInView(data);
+  }
+
   closeStockEditModal();
-  await renderStockDesdeSupabase();
-  await loadFormulasDesdeSupabase();
+  renderDashboardAlerts();
+  refreshIngredientRowsOptions();
+  syncFormulasWithStockState();
+  markCacheFresh('stock');
+  markCacheFresh('formulas');
   alert('Stock actualizado.');
 }
 
-async function handleDeleteStock(id) {
-  const confirmar = confirm("¿Eliminar esta materia prima?");
-  if (!confirmar) return;
+async function handleDeleteStock(id, triggerButton = null) {
+  const execute = async () => {
+    const confirmar = await askConfirm('Eliminar esta materia prima?', {
+      title: 'Eliminar materia prima',
+      confirmText: 'Eliminar',
+      danger: true
+    });
+    if (!confirmar) return;
 
-  const { error } = await supabaseClient
-    .from('materias_primas')
-    .delete()
-    .eq('id', id);
+    const { error } = await supabaseClient
+      .from('materias_primas')
+      .delete()
+      .eq('id', id);
 
-  if (error) {
-    console.error('Error al eliminar:', error);
-    alert('Error al eliminar');
-    return;
+    if (error) {
+      console.error('Error al eliminar:', error);
+      alert('Error al eliminar');
+      return;
+    }
+
+    state.stockItems = state.stockItems.filter((item) => normalizeId(item.id) !== normalizeId(id));
+    removeStockFromView(id);
+    renderDashboardAlerts();
+    refreshIngredientRowsOptions();
+    syncFormulasWithStockState();
+    markCacheFresh('stock');
+    markCacheFresh('formulas');
+    alert('Stock eliminado correctamente.');
+  };
+
+  if (triggerButton) {
+    return runWithButtonLoading(triggerButton, execute, 'Eliminando...');
   }
-
-  await renderStockDesdeSupabase();
-  await loadFormulasDesdeSupabase();
+  return execute();
 }
-
 
 /** Filtra stock por cualquier campo */
 function handleStockSearch(event) {
-  renderStockList(event.target.value);
+  debouncedStockSearch(event.target.value);
 }
 
 // ---- Opciones de formulas para el datalist ----
@@ -2109,6 +2534,37 @@ function refreshFormulaOptions() {
     .join('');
   const datalist = document.getElementById('formulaOptions');
   if (datalist) datalist.innerHTML = options;
+}
+
+function buildMateriaMapFromState() {
+  return new Map(state.stockItems.map((item) => [String(item.id), item]));
+}
+
+function syncFormulasWithStockState() {
+  if (!Array.isArray(state.formulas) || !state.formulas.length) return;
+  const materiaMap = buildMateriaMapFromState();
+
+  state.formulas = state.formulas.map((formula) => {
+    const ingredientes = (formula.ingredientes || []).map((ing) => {
+      const materia = materiaMap.get(String(ing.materia_prima_id));
+      return {
+        ...ing,
+        nombre: materia?.nombre || ing.nombre || `Materia #${ing.materia_prima_id}`,
+        unidad: ing.unidad || materia?.unidad_base || '',
+        costo_unitario: materia ? Number(materia.costo_unitario) || 0 : Number(ing.costo_unitario || 0)
+      };
+    });
+
+    return {
+      ...formula,
+      ingredientes,
+      costoEstimado: calcFormulaCost(ingredientes, materiaMap)
+    };
+  });
+
+  if (formulaList) renderFormulaList(formulaSearch?.value || '');
+  refreshFormulaOptions();
+  if (formulaInput?.value?.trim()) autofillCostoDesdeFormula(formulaInput.value);
 }
 
 // ---- Importacion CSV / Excel ----
@@ -2290,7 +2746,7 @@ async function upsertImportedFormulas(formulas) {
     }
   }
 
-  await loadFormulasDesdeSupabase();
+  await loadFormulasDesdeSupabase({ force: true });
 
   if (missingMaterias.size) {
     alert(`Componentes omitidos por falta de materia prima en stock: ${Array.from(missingMaterias).join(', ')}`);
@@ -2341,18 +2797,8 @@ function handleImportFile(event) {
 
 // ---- Datos de ejemplo para probar la interfaz ----
 // ---- Inicializacion ----
-async function cargarPreparados() {
-  const { data, error } = await supabaseClient
-    .from('preparados')
-    .select('*')
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    console.error('Error cargando preparados:', error);
-    return;
-  }
-
-  state.items = data.map(item => ({
+function mapPreparadoRowToState(item) {
+  return {
     id: item.id,
     cliente: item.cliente,
     formula: item.formula,
@@ -2373,59 +2819,12 @@ async function cargarPreparados() {
       url: item.archivo_receta_url
     }),
     createdAt: item.created_at ? new Date(item.created_at).getTime() : Date.now()
-  }));
+  };
 }
 
-/** Obtiene mapa fresco de materias primas desde Supabase, asegura costo_unitario actualizado */
-async function getMateriaMapFresh() {
-  const { data, error } = await supabaseClient
-    .from('materias_primas')
-    .select('id, nombre, unidad_base, costo_unitario, stock_actual, stock_minimo, lote, proveedor, fecha_vencimiento, created_at')
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    console.error('Error cargando materias primas para costos:', error);
-    return new Map(state.stockItems.map((m) => [String(m.id), m]));
-  }
-
-  state.stockItems = data || [];
-  renderDashboardAlerts();
-  refreshIngredientRowsOptions();
-
-  return new Map((data || []).map((m) => [String(m.id), m]));
-}
-
-async function loadFormulasDesdeSupabase() {
-  const materiaMap = await getMateriaMapFresh();
-
-  const { data: formulasData, error: formulasError } = await supabaseClient
-    .from('formulas')
-    .select('*')
-    .order('created_at', { ascending: false });
-
-  if (formulasError) {
-    console.error('Error cargando formulas:', formulasError);
-    return;
-  }
-
-  const formulaIds = (formulasData || []).map((f) => f.id);
-  let componentesData = [];
-
-  if (formulaIds.length) {
-    const { data: compData, error: compError } = await supabaseClient
-      .from('formula_componentes')
-      .select('*')
-      .in('formula_id', formulaIds);
-
-    if (compError) {
-      console.error('Error cargando componentes de formulas:', compError);
-    } else {
-      componentesData = compData;
-    }
-  }
-
-  state.formulas = (formulasData || []).map((formula) => {
-    const ingredientes = componentesData
+function mapFormulasToState(formulasData, componentesData, materiaMap) {
+  return (formulasData || []).map((formula) => {
+    const ingredientes = (componentesData || [])
       .filter((c) => String(c.formula_id) === String(formula.id))
       .map((c) => {
         const materia = materiaMap.get(String(c.materia_prima_id));
@@ -2441,36 +2840,237 @@ async function loadFormulasDesdeSupabase() {
         };
       });
 
-    const costoEstimado = calcFormulaCost(ingredientes, materiaMap);
-
     return {
       id: formula.id,
       nombre: formula.nombre,
       forma: formula.forma_farmaceutica || formula.forma || '',
       presentacion: formula.presentacion_estandar || formula.presentacion || '',
       ingredientes,
-      costoEstimado,
+      costoEstimado: calcFormulaCost(ingredientes, materiaMap),
       createdAt: formula.created_at ? new Date(formula.created_at).getTime() : Date.now()
     };
   });
-
-  renderFormulaList(formulaSearch?.value || '');
-  refreshFormulaOptions();
-
-  if (form && formulaInput && formulaInput.value?.trim()) {
-    autofillCostoDesdeFormula(formulaInput.value);
-  }
 }
+
+async function cargarPreparados(options = {}) {
+  const { force = false, skipRender = false } = options;
+  const cache = dataCache.preparados;
+
+  if (!force && isCacheFresh('preparados')) {
+    if (!skipRender) renderList(searchInput?.value || '');
+    return state.items;
+  }
+
+  if (cache.loadingPromise && !force) return cache.loadingPromise;
+
+  const task = (async () => {
+    perfStart('load:preparados');
+    const { data, error } = await supabaseClient
+      .from('preparados')
+      .select('id, cliente, formula, cantidad, forma_farmaceutica, unidad, fecha_carga, dia_entrega, observaciones, estado, stock_aplicado, costo, porcentaje_recargo, precio_final, archivo_receta_nombre, archivo_receta_path, archivo_receta_url, created_at')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error cargando preparados:', error);
+      return state.items;
+    }
+
+    state.items = (data || []).map(mapPreparadoRowToState);
+    markCacheFresh('preparados');
+
+    if (!skipRender) renderList(searchInput?.value || '');
+    return state.items;
+  })().finally(() => {
+    cache.loadingPromise = null;
+    perfEnd('load:preparados');
+  });
+
+  cache.loadingPromise = task;
+  return task;
+}
+
+/** Obtiene mapa fresco de materias primas desde Supabase, asegura costo_unitario actualizado */
+async function getMateriaMapFresh(options = {}) {
+  const { force = false } = options;
+  await renderStockDesdeSupabase({ force, skipRender: true });
+  return buildMateriaMapFromState();
+}
+
+async function renderStockDesdeSupabase(options = {}) {
+  const { force = false, skipRender = false } = options;
+  const cache = dataCache.stock;
+
+  if (!force && isCacheFresh('stock')) {
+    if (!skipRender) {
+      renderStockList(stockSearch?.value || '');
+      renderDashboardAlerts();
+      refreshIngredientRowsOptions();
+    }
+    return state.stockItems;
+  }
+
+  if (cache.loadingPromise && !force) return cache.loadingPromise;
+
+  const task = (async () => {
+    perfStart('load:stock');
+    const { data, error } = await supabaseClient
+      .from('materias_primas')
+      .select('id, nombre, unidad_base, stock_actual, stock_minimo, costo_unitario, lote, proveedor, fecha_vencimiento, created_at')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error al cargar stock:', error);
+      return state.stockItems;
+    }
+
+    state.stockItems = data || [];
+    markCacheFresh('stock');
+
+    if (!skipRender) {
+      renderStockList(stockSearch?.value || '');
+      renderDashboardAlerts();
+      refreshIngredientRowsOptions();
+      syncFormulasWithStockState();
+    }
+
+    return state.stockItems;
+  })().finally(() => {
+    cache.loadingPromise = null;
+    perfEnd('load:stock');
+  });
+
+  cache.loadingPromise = task;
+  return task;
+}
+
+async function loadFormulasDesdeSupabase(options = {}) {
+  const { force = false, skipRender = false } = options;
+  const cache = dataCache.formulas;
+
+  if (!force && isCacheFresh('formulas')) {
+    if (!skipRender) {
+      renderFormulaList(formulaSearch?.value || '');
+      refreshFormulaOptions();
+    }
+    return state.formulas;
+  }
+
+  if (cache.loadingPromise && !force) return cache.loadingPromise;
+
+  const task = (async () => {
+    perfStart('load:formulas');
+    await renderStockDesdeSupabase({ force: false, skipRender: true });
+    const materiaMap = buildMateriaMapFromState();
+
+    const { data: formulasData, error: formulasError } = await supabaseClient
+      .from('formulas')
+      .select('id, nombre, forma_farmaceutica, presentacion_estandar, created_at')
+      .order('created_at', { ascending: false });
+
+    if (formulasError) {
+      console.error('Error cargando formulas:', formulasError);
+      return state.formulas;
+    }
+
+    const formulaIds = (formulasData || []).map((f) => f.id);
+    let componentesData = [];
+
+    if (formulaIds.length) {
+      const { data: compData, error: compError } = await supabaseClient
+        .from('formula_componentes')
+        .select('id, formula_id, materia_prima_id, cantidad, unidad, observaciones')
+        .in('formula_id', formulaIds);
+
+      if (compError) {
+        console.error('Error cargando componentes de formulas:', compError);
+      } else {
+        componentesData = compData || [];
+      }
+    }
+
+    state.formulas = mapFormulasToState(formulasData, componentesData, materiaMap);
+    markCacheFresh('formulas');
+
+    if (!skipRender) {
+      renderFormulaList(formulaSearch?.value || '');
+      refreshFormulaOptions();
+      if (form && formulaInput && formulaInput.value?.trim()) {
+        autofillCostoDesdeFormula(formulaInput.value);
+      }
+    }
+
+    return state.formulas;
+  })().finally(() => {
+    cache.loadingPromise = null;
+    perfEnd('load:formulas');
+  });
+
+  cache.loadingPromise = task;
+  return task;
+}
+
+async function refreshAllData(options = {}) {
+  const { section = 'all' } = options;
+
+  if (section === 'preparados') {
+    await cargarPreparados({ force: true });
+    alert('Preparados actualizados.');
+    return;
+  }
+
+  if (section === 'stock') {
+    await renderStockDesdeSupabase({ force: true });
+    alert('Stock actualizado.');
+    return;
+  }
+
+  if (section === 'formulas') {
+    await loadFormulasDesdeSupabase({ force: true });
+    alert('Formulas actualizadas.');
+    return;
+  }
+
+  await Promise.all([
+    cargarPreparados({ force: true }),
+    renderStockDesdeSupabase({ force: true }),
+    loadFormulasDesdeSupabase({ force: true })
+  ]);
+  alert('Datos actualizados.');
+}
+
 async function init() {
-  await cargarPreparados();
-  await renderStockDesdeSupabase();
+  perfStart('init:total');
+  ensureUiLayer();
+
+  if (listContainer) listContainer.innerHTML = renderInlineLoading('Cargando preparados...');
+  if (stockList) stockList.innerHTML = renderInlineLoading('Cargando stock...');
+  if (formulaList) formulaList.innerHTML = renderInlineLoading('Cargando formulas...');
+
+  await Promise.all([
+    cargarPreparados(),
+    renderStockDesdeSupabase()
+  ]);
 
   if (form && listContainer && searchInput) {
-    renderList();
-    form.addEventListener('submit', handleSubmit);
+    form.addEventListener('submit', (event) => {
+      const submitter = event.submitter || form.querySelector('button[type="submit"]');
+      return runWithButtonLoading(submitter, () => handleSubmit(event), state.editingId ? 'Actualizando...' : 'Guardando...');
+    });
     searchInput.addEventListener('input', handleSearch);
-    const handleFormulaInput = () => autofillCostoDesdeFormula(formulaInput?.value);
+
+    const handleFormulaInput = async () => {
+      if (!dataCache.formulas.loaded && !dataCache.formulas.loadingPromise) {
+        loadFormulasDesdeSupabase().catch((err) => console.error('No se pudo cargar formulas en segundo plano:', err));
+      }
+      autofillCostoDesdeFormula(formulaInput?.value);
+    };
+
     const handleCantidadUnidadInput = () => updateCostoProporcionalUI();
+    formulaInput?.addEventListener('focus', () => {
+      if (!dataCache.formulas.loaded && !dataCache.formulas.loadingPromise) {
+        loadFormulasDesdeSupabase().catch((err) => console.error('No se pudo cargar formulas al enfocar:', err));
+      }
+    });
     formulaInput?.addEventListener('input', handleFormulaInput);
     formulaInput?.addEventListener('change', handleFormulaInput);
     cantidadInput?.addEventListener('input', handleCantidadUnidadInput);
@@ -2482,9 +3082,15 @@ async function init() {
   }
 
   if (stockForm && stockList && stockSearch) {
-    stockForm.addEventListener('submit', handleStockSubmit);
+    stockForm.addEventListener('submit', (event) => {
+      const submitter = event.submitter || stockForm.querySelector('button[type="submit"]');
+      return runWithButtonLoading(submitter, () => handleStockSubmit(event), 'Guardando...');
+    });
     stockSearch.addEventListener('input', handleStockSearch);
-    stockEditForm?.addEventListener('submit', handleStockEditSubmit);
+    stockEditForm?.addEventListener('submit', (event) => {
+      const submitter = event.submitter || stockEditForm.querySelector('button[type="submit"]');
+      return runWithButtonLoading(submitter, () => handleStockEditSubmit(event), 'Guardando...');
+    });
     stockEditCloseBtn?.addEventListener('click', closeStockEditModal);
     stockEditCancelBtn?.addEventListener('click', closeStockEditModal);
     stockEditModal?.addEventListener('click', (event) => {
@@ -2493,9 +3099,11 @@ async function init() {
   }
 
   if (formulaForm && formulaList && ingredientsContainer) {
-    await loadFormulasDesdeSupabase();
     resetFormulaForm();
-    formulaForm.addEventListener('submit', handleFormulaSubmit);
+    formulaForm.addEventListener('submit', (event) => {
+      const submitter = event.submitter || formulaForm.querySelector('button[type="submit"]');
+      return runWithButtonLoading(submitter, () => handleFormulaSubmit(event), editingFormulaId ? 'Actualizando...' : 'Guardando...');
+    });
     addIngredientBtn?.addEventListener('click', handleAddIngredient);
     formulaSearch?.addEventListener('input', handleFormulaSearch);
     formulaResetBtn?.addEventListener('click', resetFormulaForm);
@@ -2503,28 +3111,38 @@ async function init() {
     importInput?.addEventListener('change', handleImportFile);
   }
 
+  const ensureFormulasLoaded = () => {
+    if (dataCache.formulas.loaded || dataCache.formulas.loadingPromise) return;
+    loadFormulasDesdeSupabase().catch((err) => console.error('No se pudo cargar formulas:', err));
+  };
+
+  const maybeLoadSecondary = () => {
+    const hash = window.location.hash;
+    if (hash === '#formulas' || hash === '#pendientes') ensureFormulasLoaded();
+  };
+
+  window.addEventListener('hashchange', maybeLoadSecondary);
+  maybeLoadSecondary();
+  const formulasSection = document.getElementById('formulas');
+  if ('IntersectionObserver' in window && formulasSection) {
+    const formulasObserver = new IntersectionObserver((entries, observer) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      ensureFormulasLoaded();
+      observer.disconnect();
+    }, { rootMargin: '180px 0px' });
+    formulasObserver.observe(formulasSection);
+  } else {
+    setTimeout(ensureFormulasLoaded, 600);
+  }
+
+  window.guimeransRefresh = refreshAllData;
+
   refreshFormulaOptions();
+  perfEnd('init:total');
 }
 
 init();
 
-
-async function renderStockDesdeSupabase() {
-  const { data, error } = await supabaseClient
-    .from('materias_primas')
-    .select('*')
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    console.error('Error al cargar stock:', error);
-    return;
-  }
-
-  state.stockItems = data || [];
-  renderStockList(stockSearch?.value || '');
-  renderDashboardAlerts();
-  refreshIngredientRowsOptions();
-}
 async function handleEditStock(id) {
   const item = state.stockItems.find((s) => String(s.id) === String(id));
   if (!item) {
