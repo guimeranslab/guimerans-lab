@@ -410,12 +410,14 @@ body:has(#reportes:target) .nav-links a[href="#reportes"] {
 
 #pendientes .section-head,
 #formulas .section-head,
+#clientes .section-head,
 #stock .section-head {
   margin-bottom: 24px;
 }
 
 #pendientes .section-head h2,
 #formulas .section-head h2,
+#clientes .section-head h2,
 #stock .section-head h2 {
   font-size: clamp(2rem, 1.55rem + 1.3vw, 2.55rem);
   font-weight: 700;
@@ -424,6 +426,7 @@ body:has(#reportes:target) .nav-links a[href="#reportes"] {
 
 #pendientes .section-head .muted,
 #formulas .section-head .muted,
+#clientes .section-head .muted,
 #stock .section-head .muted {
   font-size: 14px;
   max-width: 72ch;
@@ -434,12 +437,15 @@ body:has(#reportes:target) .nav-links a[href="#reportes"] {
 .prep-form,
 .stock-form,
 .formula-form,
+.clientes-form,
 .prep-board,
 .stock-board,
 .formula-board,
+.clientes-board,
 .prep-card,
 .stock-card,
 .formula-card,
+.cliente-card,
 .modal-content {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -679,7 +685,8 @@ input[type="file"]::file-selector-button:hover {
 
 .pending-layout,
 .stock-layout,
-.formula-layout {
+.formula-layout,
+.clientes-layout {
   display: grid;
   grid-template-columns: minmax(320px, 1fr) minmax(420px, 1.55fr);
   gap: 28px;
@@ -689,14 +696,16 @@ input[type="file"]::file-selector-button:hover {
 @media (max-width: 1024px) {
   .pending-layout,
   .stock-layout,
-  .formula-layout {
+  .formula-layout,
+  .clientes-layout {
     grid-template-columns: 1fr;
   }
 }
 
 .prep-form,
 .stock-form,
-.formula-form {
+.formula-form,
+.clientes-form {
   padding: 24px;
   display: grid;
   gap: 18px;
@@ -706,7 +715,8 @@ input[type="file"]::file-selector-button:hover {
 
 .prep-form > .form-row,
 .stock-form > .form-row,
-.formula-form > .form-row {
+.formula-form > .form-row,
+.clientes-form > .form-row {
   background: #FAFCFF;
   border: 1px solid #E7EEF6;
   border-radius: 14px;
@@ -715,7 +725,8 @@ input[type="file"]::file-selector-button:hover {
 
 .prep-form > label,
 .stock-form > label,
-.formula-form > label {
+.formula-form > label,
+.clientes-form > label {
   background: #FAFCFF;
   border: 1px solid #E7EEF6;
   border-radius: 14px;
@@ -745,7 +756,8 @@ input[type="file"]::file-selector-button:hover {
 
 .prep-board,
 .stock-board,
-.formula-board {
+.formula-board,
+.clientes-board {
   padding: 0;
   background: transparent;
   border-color: transparent;
@@ -810,14 +822,16 @@ input[type="file"]::file-selector-button:hover {
 
 .prep-list,
 .stock-list,
-.formula-list {
+.formula-list,
+.clientes-list {
   display: grid;
   gap: 18px;
 }
 
 .prep-card,
 .stock-card,
-.formula-card {
+.formula-card,
+.cliente-card {
   padding: 24px;
   transition:
     transform var(--motion-ui),
@@ -859,6 +873,88 @@ input[type="file"]::file-selector-button:hover {
 .formula-card:hover {
   box-shadow: 0 16px 30px rgba(15, 23, 42, 0.1);
   transform: translateY(-2px);
+}
+
+.cliente-card:hover {
+  box-shadow: 0 16px 30px rgba(15, 23, 42, 0.1);
+  transform: translateY(-2px);
+}
+
+.cliente-card {
+  display: grid;
+  gap: 14px;
+}
+
+.cliente-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #ECF1F7;
+}
+
+.cliente-name {
+  margin: 0;
+  color: var(--text-main);
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.cliente-sub {
+  margin-top: 3px;
+  color: #94A3B8;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.cliente-contact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.cliente-contact-item {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #E6EDF5;
+  background: #FAFCFF;
+  display: grid;
+  gap: 4px;
+}
+
+.cliente-contact-label {
+  color: #94A3B8;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.cliente-contact-value {
+  color: var(--text-main);
+  font-size: 14px;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.cliente-notes {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #E6EDF5;
+  border-radius: 12px;
+  background: #F8FAFC;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.cliente-notes strong {
+  color: #334155;
 }
 
 .prep-card-head {
@@ -1312,6 +1408,29 @@ input[type="file"]::file-selector-button:hover {
   gap: 12px;
 }
 
+.cliente-history-modal-content {
+  width: min(1040px, 96vw);
+  max-height: 88vh;
+  overflow: hidden;
+}
+
+.cliente-history-heading h3 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.cliente-history-heading .muted {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.cliente-history-list {
+  overflow: auto;
+  max-height: calc(88vh - 110px);
+  padding-right: 4px;
+}
+
 .modal-header {
   display: flex;
   align-items: center;
@@ -1650,7 +1769,8 @@ input[type="file"]::file-selector-button:hover {
 
   .prep-card .actions .btn,
   .stock-actions .btn,
-  .formula-card .actions .btn {
+  .formula-card .actions .btn,
+  .cliente-card .actions .btn {
     flex: 1 1 auto;
   }
 }

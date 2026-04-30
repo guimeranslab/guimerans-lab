@@ -94,7 +94,9 @@
         <form id="prepForm" class="prep-form" aria-label="Registrar nuevo preparado">
           <div class="form-row">
             <label><span class="label-with-icon"><svg class="ui-icon ui-icon-sm" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-user"></use></svg>Cliente</span>
-              <input type="text" name="cliente" placeholder="Nombre del cliente" required>
+              <input id="prepClienteInput" list="prepClienteOptions" type="text" name="cliente" placeholder="Buscar o escribir cliente" autocomplete="off" required>
+              <input id="prepClienteId" type="hidden" name="clienteId">
+              <datalist id="prepClienteOptions"></datalist>
             </label>
             <label><span class="label-with-icon"><svg class="ui-icon ui-icon-sm" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-flask"></use></svg>Formula</span>
               <input list="formulaOptions" type="text" name="formula" placeholder="Ej. Solucion 12B" required>
@@ -244,10 +246,53 @@
       <div class="section-head">
         <p class="eyebrow">Relaciones</p>
         <h2>Clientes</h2>
-        <p class="muted">Gestione aqui los clientes de la farmacia.</p>
+        <p class="muted">Registra, busca y mantiene actualizado tu padr&oacute;n de clientes.</p>
       </div>
-      <div class="panel">
-        <div class="placeholder">No hay clientes registrados.</div>
+
+      <div class="clientes-layout">
+        <form id="clientesForm" class="clientes-form" aria-label="Crear o editar cliente">
+          <div class="form-row">
+            <label>Nombre
+              <input type="text" name="nombre" placeholder="Ej. Ana" required>
+            </label>
+            <label>Apellido
+              <input type="text" name="apellido" placeholder="Ej. Perez" required>
+            </label>
+          </div>
+
+          <div class="form-row">
+            <label>Telefono
+              <input type="tel" name="telefono" placeholder="Ej. +54 11 1234 5678">
+            </label>
+            <label>Email
+              <input type="email" name="email" placeholder="Ej. ana@email.com">
+            </label>
+          </div>
+
+          <label>Notas
+            <textarea name="notas" rows="2" placeholder="Observaciones del cliente"></textarea>
+          </label>
+
+          <div class="form-actions">
+            <button type="submit" class="btn primary" id="clientesSubmitBtn">Guardar cliente</button>
+            <button type="button" class="btn secondary" id="clientesResetBtn">Limpiar</button>
+            <p class="hint">Los datos se guardan en Supabase y quedan disponibles para futuras integraciones.</p>
+          </div>
+        </form>
+
+        <div class="clientes-board">
+          <div class="board-top">
+            <div class="search-group">
+              <input id="clientesSearch" type="search" placeholder="Buscar por nombre o apellido" aria-label="Buscar clientes">
+              <span class="kbd">Ctrl + F</span>
+            </div>
+            <div class="status-legend">
+              <span class="pill alert-pill">Clientes registrados</span>
+            </div>
+          </div>
+
+          <div id="clientesList" class="clientes-list" aria-live="polite"></div>
+        </div>
       </div>
     </section>
 
@@ -357,6 +402,20 @@
             <button type="submit" class="btn primary">Guardar cambios</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <div id="clienteHistoryModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="clienteHistoryTitle">
+      <div class="modal-backdrop" data-action="close-history"></div>
+      <div class="modal-content cliente-history-modal-content">
+        <div class="modal-header">
+          <div class="cliente-history-heading">
+            <h3 id="clienteHistoryTitle">Historial del cliente</h3>
+            <p id="clienteHistorySubtitle" class="muted"></p>
+          </div>
+          <button type="button" class="modal-close" aria-label="Cerrar historial">&times;</button>
+        </div>
+        <div id="clienteHistoryList" class="prep-list cliente-history-list" aria-live="polite"></div>
       </div>
     </div>
 

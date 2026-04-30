@@ -8,7 +8,8 @@ const state = {
   items: [],       // Preparados pendientes
   editingId: null,
   stockItems: [],  // Inventario de materias primas
-  formulas: []     // Biblioteca de formulas
+  formulas: [],    // Biblioteca de formulas
+  clientes: []     // Catalogo de clientes
 };
 
 // Referencias a elementos de la interfaz
@@ -30,6 +31,11 @@ const formulaSearch = document.getElementById('formulaSearch');
 const formulaResetBtn = document.getElementById('formulaResetBtn');
 const formulaSubmitBtn = document.getElementById('formulaSubmitBtn');
 const formulaCostLabel = document.getElementById('formulaCostLabel');
+const clientesForm = document.getElementById('clientesForm');
+const clientesList = document.getElementById('clientesList');
+const clientesSearch = document.getElementById('clientesSearch');
+const clientesSubmitBtn = document.getElementById('clientesSubmitBtn');
+const clientesResetBtn = document.getElementById('clientesResetBtn');
 const importBtn = document.getElementById('importBtn');
 const importInput = document.getElementById('importInput');
 const importSummary = document.getElementById('importSummary');
@@ -37,6 +43,14 @@ const stockEditModal = document.getElementById('stockEditModal');
 const stockEditForm = document.getElementById('stockEditForm');
 const stockEditCloseBtn = stockEditModal?.querySelector('.modal-close');
 const stockEditCancelBtn = stockEditModal?.querySelector('.modal-cancel');
+const clienteHistoryModal = document.getElementById('clienteHistoryModal');
+const clienteHistoryTitle = document.getElementById('clienteHistoryTitle');
+const clienteHistorySubtitle = document.getElementById('clienteHistorySubtitle');
+const clienteHistoryList = document.getElementById('clienteHistoryList');
+const clienteHistoryCloseBtn = clienteHistoryModal?.querySelector('.modal-close');
+const prepClienteInput = form?.querySelector('input[name="cliente"]');
+const prepClienteIdInput = form?.querySelector('input[name="clienteId"]');
+const prepClienteOptions = document.getElementById('prepClienteOptions');
 const formulaInput = form?.querySelector('input[name="formula"]');
 const cantidadInput = form?.querySelector('input[name="cantidad"]');
 const unidadMedidaInput = form?.querySelector('select[name="unidadMedida"]');
@@ -45,6 +59,7 @@ const recargoInput = form?.querySelector('input[name="recargo"]');
 const precioFinalInput = form?.querySelector('input[name="precioFinal"]');
 
 let editingFormulaId = null;
+let editingClienteId = null;
 let selectedPrepFormulaBase = null;
 const STOCK_IMPACT_STATUSES = new Set(['Listo', 'Entregado']);
 const MOVIMIENTO_STOCK_CONSUMO = 'consumo_preparado';
@@ -52,6 +67,7 @@ const MOVIMIENTO_STOCK_REVERSION = 'reversion_preparado';
 const PREPARADOS_RECETAS_BUCKET = 'recetas-preparados';
 const CACHE_TTL_MS = 2 * 60 * 1000;
 const SEARCH_DEBOUNCE_MS = 280;
+const CLIENT_SEARCH_DEBOUNCE_MS = 300;
 const PERF_LOGS = false;
 
 const dataCache = {
@@ -423,6 +439,36 @@ function normalizeDateForInput(value) {
   return parsed.toISOString().slice(0, 10);
 }
 
+function formatDate(value, fallback = '-') {
+  if (value === null || value === undefined) return fallback;
+  const raw = String(value).trim();
+  if (!raw) return fallback;
+
+  const isoLikeMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoLikeMatch) {
+    const [, yearStr, monthStr, dayStr] = isoLikeMatch;
+    const year = Number(yearStr);
+    const month = Number(monthStr);
+    const day = Number(dayStr);
+    const probe = new Date(Date.UTC(year, month - 1, day));
+
+    if (
+      probe.getUTCFullYear() === year
+      && probe.getUTCMonth() === month - 1
+      && probe.getUTCDate() === day
+    ) {
+      return `${dayStr}/${monthStr}/${yearStr}`;
+    }
+  }
+
+  const parsed = parseDateSafe(raw);
+  if (!parsed) return fallback;
+  const day = String(parsed.getDate()).padStart(2, '0');
+  const month = String(parsed.getMonth() + 1).padStart(2, '0');
+  const year = String(parsed.getFullYear());
+  return `${day}/${month}/${year}`;
+}
+
 function setStockEditFieldValue(fieldName, value) {
   if (!stockEditForm) return;
   const field = stockEditForm.elements.namedItem(fieldName);
@@ -644,6 +690,7 @@ async function advanceStatus(id, triggerButton = null) {
 function matchesSearch(item, term) {
   if (!term) return true;
   const target = [
+    getPreparadoClienteDisplayName(item),
     item.cliente,
     item.formula,
     item.cantidad,
@@ -674,6 +721,110 @@ function matchesFormulaSearch(item, term) {
     ingText
   ].join(' ').toLowerCase();
   return target.includes(term.toLowerCase());
+}
+
+function getClienteFullName(cliente) {
+  const nombre = String(cliente?.nombre || '').trim();
+  const apellido = String(cliente?.apellido || '').trim();
+  return `${nombre} ${apellido}`.trim() || 'Cliente sin nombre';
+}
+
+function findClienteById(clienteId) {
+  const id = normalizeId(clienteId);
+  if (!id) return null;
+  return ensureClientesStateArray().find((cliente) => normalizeId(cliente.id) === id) || null;
+}
+
+function splitClienteNombreCompleto(nombreCompleto) {
+  const normalized = String(nombreCompleto || '').trim().replace(/\s+/g, ' ');
+  if (!normalized) return { nombre: '', apellido: '' };
+
+  const [nombre = '', ...apellidoParts] = normalized.split(' ');
+  return {
+    nombre: String(nombre || '').trim(),
+    apellido: apellidoParts.join(' ').trim()
+  };
+}
+
+function findClienteByDisplayName(name) {
+  const target = normalizeText(name);
+  if (!target) return null;
+
+  return ensureClientesStateArray().find((cliente) => normalizeText(getClienteFullName(cliente)) === target) || null;
+}
+
+function getPreparadoClienteDisplayName(item) {
+  const linkedCliente = findClienteById(item?.clienteId);
+  if (linkedCliente) return getClienteFullName(linkedCliente);
+  return String(item?.cliente || '').trim() || 'Cliente sin nombre';
+}
+
+function findClienteIdByDisplayName(name) {
+  const match = findClienteByDisplayName(name);
+  return match ? normalizeId(match.id) : '';
+}
+
+function syncPrepClienteSelectionFromInput() {
+  if (!prepClienteInput || !prepClienteIdInput) return '';
+  const matchedId = findClienteIdByDisplayName(prepClienteInput.value);
+  prepClienteIdInput.value = matchedId || '';
+  return matchedId;
+}
+
+function refreshPrepClienteOptions() {
+  if (!prepClienteOptions) return;
+  prepClienteOptions.innerHTML = '';
+
+  const sortedClientes = ensureClientesStateArray()
+    .slice()
+    .sort((a, b) => getClienteFullName(a).localeCompare(getClienteFullName(b), 'es', { sensitivity: 'base' }));
+
+  sortedClientes.forEach((cliente) => {
+    const option = document.createElement('option');
+    option.value = getClienteFullName(cliente);
+    option.dataset.id = normalizeId(cliente.id);
+    prepClienteOptions.appendChild(option);
+  });
+}
+
+async function getOrCreateCliente(nombreCompleto) {
+  const normalizedName = String(nombreCompleto || '').trim().replace(/\s+/g, ' ');
+  if (!normalizedName) return null;
+
+  await getClientes();
+
+  const existingCliente = findClienteByDisplayName(normalizedName);
+  if (existingCliente?.id !== null && existingCliente?.id !== undefined) {
+    return normalizeId(existingCliente.id);
+  }
+
+  const { nombre, apellido } = splitClienteNombreCompleto(normalizedName);
+  if (!nombre) return null;
+
+  const createResult = await createCliente({
+    nombre,
+    apellido: apellido || ''
+  });
+
+  if (!createResult.ok) {
+    console.error('No se pudo crear cliente automaticamente desde preparado:', createResult.error);
+    return null;
+  }
+
+  refreshPrepClienteOptions();
+  return normalizeId(createResult.data?.id || '');
+}
+
+function matchesClienteSearch(item, term) {
+  if (!term) return true;
+  const haystack = [
+    item.nombre,
+    item.apellido
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  return haystack.includes(String(term).toLowerCase().trim());
 }
 
 /** Calcula el costo total de una formula a partir de sus componentes */
@@ -1204,14 +1355,22 @@ function renderEmptyState() {
   `;
 }
 
+function renderClientesEmptyState(message = 'No hay clientes registrados') {
+  return `
+    <div class="empty-state" role="status" aria-live="polite">
+      <span class="empty-state-icon" aria-hidden="true">+</span>
+      <p class="empty-state-title">${message}</p>
+      <p class="empty-state-subtitle">Completa el formulario para crear el primer cliente</p>
+    </div>
+  `;
+}
+
 function uiIcon(name, sizeClass = 'ui-icon-sm') {
   return `<svg class="ui-icon ${sizeClass}" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-${name}"></use></svg>`;
 }
 
 function formatDashboardDate(dateStr) {
-  const parsed = parseDateSafe(dateStr);
-  if (!parsed) return '-';
-  return parsed.toLocaleDateString('es-AR', { year: 'numeric', month: '2-digit', day: '2-digit' });
+  return formatDate(dateStr);
 }
 
 function renderDashboardAlertEmpty(message) {
@@ -1277,8 +1436,9 @@ function renderDashboardAlerts() {
   }
 }
 
-/** Renderiza la lista de preparados aplicando filtro de busqueda */
-function buildPreparadoCard(item) {
+/** Renderiza una card de preparado; puede usarse en modo lectura para historial */
+function buildPreparadoCard(item, options = {}) {
+  const { readOnly = false, allowRepeat = false, onRepeat = null } = options;
   const card = document.createElement('article');
   card.className = 'prep-card';
   card.dataset.status = item.status;
@@ -1286,12 +1446,28 @@ function buildPreparadoCard(item) {
 
   const nextIndex = STATUS_FLOW.indexOf(item.status) + 1;
   const nextLabel = STATUS_FLOW[nextIndex] ? `Avanzar a ${STATUS_FLOW[nextIndex]}` : 'Estado final';
+  const clienteDisplayName = getPreparadoClienteDisplayName(item);
+
+  const pdfBlock = item.pdf && item.pdf.url
+    ? readOnly
+      ? `<span>${item.pdf.name}</span> &middot; <a class="pdf-link" href="${item.pdf.url}" target="_blank" rel="noopener">Ver receta</a> &middot; <a class="pdf-link" href="${item.pdf.url}" download="${sanitizeStorageFileName(item.pdf.name)}">Descargar receta</a>`
+      : `<span>${item.pdf.name}</span> &middot; <a class="pdf-link" href="${item.pdf.url}" target="_blank" rel="noopener">Ver receta</a> &middot; <a class="pdf-link" href="${item.pdf.url}" download="${sanitizeStorageFileName(item.pdf.name)}">Descargar receta</a> &middot; <button type="button" class="pdf-link pdf-delete-link" data-action="delete-receta">Eliminar receta</button>`
+    : 'No adjuntado';
+
+  const actionsHtml = readOnly
+    ? (allowRepeat ? '<button class="btn secondary" data-action="repeat">Repetir preparado</button>' : '')
+    : `
+        <button class="btn primary" data-action="advance" ${item.status === 'Entregado' ? 'disabled' : ''}>${nextLabel}</button>
+        ${item.status !== 'Pendiente' ? '<button class="btn secondary" data-action="to-pending">Volver a Pendiente</button>' : ''}
+        <button class="btn secondary" data-action="edit">Editar</button>
+        <button class="btn danger" data-action="delete">Eliminar</button>
+      `;
 
   card.innerHTML = `
     <div class="prep-card-head">
       <div class="prep-title-wrap">
         <span class="pill status status-${item.status.toLowerCase()}">${item.status}</span>
-        <span class="prep-client">${uiIcon('user', 'ui-icon-md')}${item.cliente}</span>
+        <span class="prep-client">${uiIcon('user', 'ui-icon-md')}${clienteDisplayName}</span>
       </div>
       <div class="prep-chips">
         <span class="badge prep-chip">${uiIcon('flask', 'ui-icon-xs')}${item.formula}</span>
@@ -1305,11 +1481,11 @@ function buildPreparadoCard(item) {
       </div>
       <div class="metric">
         <span class="metric-label">${uiIcon('calendar', 'ui-icon-xs')}Carga</span>
-        <strong>${item.fechaCarga}</strong>
+        <strong>${formatDate(item.fechaCarga)}</strong>
       </div>
       <div class="metric">
         <span class="metric-label">${uiIcon('calendar', 'ui-icon-xs')}Entrega</span>
-        <strong>${item.diaEntrega}</strong>
+        <strong>${formatDate(item.diaEntrega)}</strong>
       </div>
       <div class="metric">
         <span class="metric-label">Costo</span>
@@ -1327,43 +1503,41 @@ function buildPreparadoCard(item) {
     <p class="meta prep-notes">Notas: ${item.observaciones || 'Sin observaciones'}</p>
     <div class="prep-card-footer">
       <div class="meta prep-pdf">
-        PDF: ${item.pdf && item.pdf.url
-      ? `<span>${item.pdf.name}</span> &middot; <a class="pdf-link" href="${item.pdf.url}" target="_blank" rel="noopener">Ver receta</a> &middot; <a class="pdf-link" href="${item.pdf.url}" download="${sanitizeStorageFileName(item.pdf.name)}">Descargar receta</a> &middot; <button type="button" class="pdf-link pdf-delete-link" data-action="delete-receta">Eliminar receta</button>`
-      : 'No adjuntado'}
+        PDF: ${pdfBlock}
       </div>
 
-      <div class="actions">
-        <button class="btn primary" data-action="advance" ${item.status === 'Entregado' ? 'disabled' : ''}>${nextLabel}</button>
-        ${item.status !== 'Pendiente' ? '<button class="btn secondary" data-action="to-pending">Volver a Pendiente</button>' : ''}
-        <button class="btn secondary" data-action="edit">Editar</button>
-        <button class="btn danger" data-action="delete">Eliminar</button>
-      </div>
+      ${actionsHtml ? `<div class="actions">${actionsHtml}</div>` : ''}
     </div>
   `;
 
-  const advanceBtn = card.querySelector('[data-action="advance"]');
-  if (advanceBtn) {
-    advanceBtn.addEventListener('click', () => advanceStatus(item.id, advanceBtn));
-  }
+  if (!readOnly) {
+    const advanceBtn = card.querySelector('[data-action="advance"]');
+    if (advanceBtn) {
+      advanceBtn.addEventListener('click', () => advanceStatus(item.id, advanceBtn));
+    }
 
-  const editBtn = card.querySelector('[data-action="edit"]');
-  if (editBtn) {
-    editBtn.addEventListener('click', () => editPreparado(item.id));
-  }
+    const editBtn = card.querySelector('[data-action="edit"]');
+    if (editBtn) {
+      editBtn.addEventListener('click', () => editPreparado(item.id));
+    }
 
-  const toPendingBtn = card.querySelector('[data-action="to-pending"]');
-  if (toPendingBtn) {
-    toPendingBtn.addEventListener('click', () => changePreparadoStatus(item.id, 'Pendiente', toPendingBtn));
-  }
+    const toPendingBtn = card.querySelector('[data-action="to-pending"]');
+    if (toPendingBtn) {
+      toPendingBtn.addEventListener('click', () => changePreparadoStatus(item.id, 'Pendiente', toPendingBtn));
+    }
 
-  const deleteBtn = card.querySelector('[data-action="delete"]');
-  if (deleteBtn) {
-    deleteBtn.addEventListener('click', () => deletePreparado(item.id, deleteBtn));
-  }
+    const deleteBtn = card.querySelector('[data-action="delete"]');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', () => deletePreparado(item.id, deleteBtn));
+    }
 
-  const deleteRecetaBtn = card.querySelector('[data-action="delete-receta"]');
-  if (deleteRecetaBtn) {
-    deleteRecetaBtn.addEventListener('click', () => deletePreparadoReceta(item.id, deleteRecetaBtn));
+    const deleteRecetaBtn = card.querySelector('[data-action="delete-receta"]');
+    if (deleteRecetaBtn) {
+      deleteRecetaBtn.addEventListener('click', () => deletePreparadoReceta(item.id, deleteRecetaBtn));
+    }
+  } else if (allowRepeat && typeof onRepeat === 'function') {
+    const repeatBtn = card.querySelector('[data-action="repeat"]');
+    repeatBtn?.addEventListener('click', () => onRepeat(item, repeatBtn));
   }
 
   return card;
@@ -1430,7 +1604,12 @@ function editPreparado(id) {
 
   state.editingId = id;
 
-  form.cliente.value = item.cliente || '';
+  form.cliente.value = getPreparadoClienteDisplayName(item);
+  if (prepClienteIdInput) {
+    prepClienteIdInput.value = item.clienteId !== null && item.clienteId !== undefined
+      ? normalizeId(item.clienteId)
+      : '';
+  }
   form.formula.value = item.formula || '';
   form.cantidad.value = item.cantidad || '';
   form.formaFarmaceutica.value = item.formaFarmaceutica || '';
@@ -1440,6 +1619,7 @@ function editPreparado(id) {
   form.observaciones.value = item.observaciones || '';
   form.recargo.value = item.recargo ?? '';
   autofillCostoDesdeFormula(form.formula.value);
+  syncPrepClienteSelectionFromInput();
 
   form.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -1764,6 +1944,236 @@ function renderFormulaList(term = '') {
   });
 }
 
+function buildClienteCard(item) {
+  const card = document.createElement('article');
+  card.className = 'cliente-card';
+  card.dataset.clienteId = String(item.id);
+
+  const fullName = getClienteFullName(item);
+  const telefono = String(item.telefono || '').trim();
+  const email = String(item.email || '').trim();
+  const notas = String(item.notas || '').trim();
+
+  const contactBlocks = [];
+  if (telefono) {
+    contactBlocks.push(`
+      <div class="cliente-contact-item">
+        <span class="cliente-contact-label">Telefono</span>
+        <span class="cliente-contact-value">${telefono}</span>
+      </div>
+    `);
+  }
+  if (email) {
+    contactBlocks.push(`
+      <div class="cliente-contact-item">
+        <span class="cliente-contact-label">Email</span>
+        <span class="cliente-contact-value">${email}</span>
+      </div>
+    `);
+  }
+
+  card.innerHTML = `
+    <div class="cliente-card-head">
+      <div>
+        <h3 class="cliente-name">${fullName}</h3>
+        <p class="cliente-sub">Cliente</p>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn ghost" data-action="history">Ver historial</button>
+        <button type="button" class="btn secondary" data-action="edit">Editar</button>
+        <button type="button" class="btn danger" data-action="delete">Eliminar</button>
+      </div>
+    </div>
+    ${contactBlocks.length ? `<div class="cliente-contact-grid">${contactBlocks.join('')}</div>` : ''}
+    <p class="cliente-notes"><strong>Notas:</strong> ${notas || 'Sin notas'}</p>
+  `;
+
+  const editBtn = card.querySelector('[data-action="edit"]');
+  const deleteBtn = card.querySelector('[data-action="delete"]');
+  const historyBtn = card.querySelector('[data-action="history"]');
+  historyBtn?.addEventListener('click', () => openClienteHistory(item.id, historyBtn));
+  editBtn?.addEventListener('click', () => startEditCliente(item.id));
+  deleteBtn?.addEventListener('click', () => handleDeleteCliente(item.id, deleteBtn));
+
+  return card;
+}
+
+function renderClienteHistoryEmptyState(message = 'Sin historial') {
+  return `
+    <div class="empty-state" role="status" aria-live="polite">
+      <span class="empty-state-icon" aria-hidden="true">+</span>
+      <p class="empty-state-title">${message}</p>
+      <p class="empty-state-subtitle">Este cliente no tiene preparados vinculados todavia</p>
+    </div>
+  `;
+}
+
+function closeClienteHistoryModal() {
+  if (!clienteHistoryModal) return;
+  clienteHistoryModal.classList.add('hidden');
+  if (clienteHistoryList) clienteHistoryList.innerHTML = '';
+  if (clienteHistorySubtitle) clienteHistorySubtitle.textContent = '';
+}
+
+function repeatPreparadoFromHistory(item, cliente) {
+  if (!form || !item) return;
+  state.editingId = null;
+
+  if (prepClienteInput) prepClienteInput.value = getClienteFullName(cliente);
+  if (prepClienteIdInput) prepClienteIdInput.value = normalizeId(cliente?.id || item.clienteId || '');
+  form.formula.value = item.formula || '';
+  form.cantidad.value = item.cantidad ?? '';
+  form.formaFarmaceutica.value = item.formaFarmaceutica || 'Polvo';
+  form.unidadMedida.value = item.unidadMedida || 'Gramos';
+  form.fechaCarga.value = normalizeDateForInput(new Date().toISOString());
+  form.diaEntrega.value = normalizeDateForInput(item.diaEntrega);
+  form.observaciones.value = item.observaciones || '';
+  form.costo.value = Number(item.costo ?? 0).toFixed(2);
+  form.recargo.value = Number(item.recargo ?? 0);
+  updatePrecioFinalUI();
+  syncPrepClienteSelectionFromInput();
+  closeClienteHistoryModal();
+  window.location.hash = '#pendientes';
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function getPreparadosByClienteId(clienteId) {
+  const targetId = normalizeId(clienteId);
+  if (!targetId) {
+    return { ok: false, data: [], error: new Error('ID de cliente invalido para historial.') };
+  }
+
+  const { data, error } = await supabaseClient
+    .from('preparados')
+    .select('id, cliente, cliente_id, formula, cantidad, forma_farmaceutica, unidad, fecha_carga, dia_entrega, observaciones, estado, stock_aplicado, costo, porcentaje_recargo, precio_final, archivo_receta_nombre, archivo_receta_path, archivo_receta_url, created_at')
+    .eq('cliente_id', clienteId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Error cargando historial de cliente:', error);
+    return { ok: false, data: [], error };
+  }
+
+  return { ok: true, data: data || [], error: null };
+}
+
+function mergeClienteHistoryItems(preparadosRows, cliente) {
+  const linkedItems = (preparadosRows || []).map(mapPreparadoRowToState).filter(Boolean);
+  const normalizedFullName = normalizeText(getClienteFullName(cliente));
+  const legacyItems = state.items.filter((item) => {
+    if (normalizeId(item.clienteId)) return false;
+    return normalizeText(item.cliente) === normalizedFullName;
+  });
+
+  const merged = new Map();
+  [...linkedItems, ...legacyItems].forEach((item) => {
+    const key = normalizeId(item.id) || `${item.formula}-${item.createdAt}-${item.fechaCarga}`;
+    merged.set(key, item);
+  });
+
+  return Array.from(merged.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+
+async function openClienteHistory(id, triggerButton = null) {
+  const execute = async () => {
+    const cliente = findClienteById(id);
+    if (!cliente) {
+      alert('Cliente no encontrado.');
+      return;
+    }
+
+    if (!clienteHistoryModal || !clienteHistoryTitle || !clienteHistoryList) {
+      alert('No se pudo abrir el historial.');
+      return;
+    }
+
+    const fullName = getClienteFullName(cliente);
+    clienteHistoryTitle.textContent = `Historial de ${fullName}`;
+    if (clienteHistorySubtitle) clienteHistorySubtitle.textContent = 'Cargando...';
+    clienteHistoryList.innerHTML = renderInlineLoading('Cargando historial...');
+    clienteHistoryModal.classList.remove('hidden');
+
+    const result = await getPreparadosByClienteId(cliente.id);
+    if (!result.ok) {
+      if (clienteHistorySubtitle) clienteHistorySubtitle.textContent = 'No se pudo cargar historial';
+      clienteHistoryList.innerHTML = renderClienteHistoryEmptyState('Sin historial');
+      return;
+    }
+
+    const items = mergeClienteHistoryItems(result.data, cliente);
+    if (!items.length) {
+      if (clienteHistorySubtitle) clienteHistorySubtitle.textContent = 'Sin registros';
+      clienteHistoryList.innerHTML = renderClienteHistoryEmptyState('Sin historial');
+      return;
+    }
+
+    if (clienteHistorySubtitle) {
+      clienteHistorySubtitle.textContent = `${items.length} preparado(s) - ordenados por fecha mas reciente`;
+    }
+
+    const fragment = document.createDocumentFragment();
+    items.forEach((prep) => {
+      fragment.appendChild(buildPreparadoCard(prep, {
+        readOnly: true,
+        allowRepeat: true,
+        onRepeat: (selectedPrep) => repeatPreparadoFromHistory(selectedPrep, cliente)
+      }));
+    });
+    clienteHistoryList.innerHTML = '';
+    clienteHistoryList.appendChild(fragment);
+  };
+
+  if (triggerButton) {
+    return runWithButtonLoading(triggerButton, execute, 'Cargando...');
+  }
+  return execute();
+}
+
+function renderClientesList(term = '') {
+  if (!clientesList) return;
+  clientesList.innerHTML = '';
+  const filtered = ensureClientesStateArray()
+    .filter((item) => matchesClienteSearch(item, term))
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  if (!filtered.length) {
+    const hasTerm = String(term || '').trim().length > 0;
+    clientesList.innerHTML = renderClientesEmptyState(hasTerm ? 'No hay clientes que coincidan con la busqueda' : 'No hay clientes registrados');
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  filtered.forEach((item) => fragment.appendChild(buildClienteCard(item)));
+  clientesList.appendChild(fragment);
+}
+
+function startEditCliente(id) {
+  if (!clientesForm) return;
+  const item = ensureClientesStateArray().find((cliente) => normalizeId(cliente.id) === normalizeId(id));
+  if (!item) return;
+
+  editingClienteId = id;
+  clientesForm.nombre.value = item.nombre || '';
+  clientesForm.apellido.value = item.apellido || '';
+  clientesForm.telefono.value = item.telefono || '';
+  clientesForm.email.value = item.email || '';
+  clientesForm.notas.value = item.notas || '';
+  if (clientesSubmitBtn) clientesSubmitBtn.textContent = 'Actualizar cliente';
+  clientesForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function resetClienteForm() {
+  if (!clientesForm) return;
+  editingClienteId = null;
+  clientesForm.reset();
+  if (clientesSubmitBtn) {
+    clientesSubmitBtn.textContent = 'Guardar cliente';
+    if (clientesSubmitBtn.dataset.originalText) {
+      clientesSubmitBtn.dataset.originalText = 'Guardar cliente';
+    }
+  }
+}
+
 // ---- Manejadores de eventos ----
 
 /** Captura el envio del formulario y guarda un nuevo preparado en memoria */
@@ -1801,9 +2211,29 @@ async function handleSubmit(event) {
     url: existingItem?.pdf?.url
   });
 
+  const clienteNombreInput = String(formData.get('cliente') || '').trim();
+  let clienteFinalId = syncPrepClienteSelectionFromInput();
+  if (!clienteFinalId && clienteNombreInput) {
+    clienteFinalId = await getOrCreateCliente(clienteNombreInput);
+  }
+
+  const clienteVinculado = findClienteById(clienteFinalId);
+  const clienteFinalNombre = clienteVinculado ? getClienteFullName(clienteVinculado) : clienteNombreInput;
+  clienteFinalId = clienteVinculado
+    ? normalizeId(clienteVinculado.id)
+    : (normalizeId(clienteFinalId) || null);
+
+  if (prepClienteIdInput) prepClienteIdInput.value = clienteFinalId || '';
+
+  if (!clienteFinalNombre) {
+    alert('Ingresa un cliente o selecciona uno existente.');
+    return;
+  }
+
   const newItem = {
     id: genId(),
-    cliente: formData.get('cliente').trim(),
+    cliente: clienteFinalNombre,
+    clienteId: clienteFinalId,
     formula: formData.get('formula').trim(),
     cantidad: Number(formData.get('cantidad')),
     formaFarmaceutica: formData.get('formaFarmaceutica'),
@@ -1901,6 +2331,7 @@ async function handleSubmit(event) {
   if (editingId) {
     const updatePayload = {
       cliente: newItem.cliente,
+      cliente_id: newItem.clienteId || null,
       formula: newItem.formula,
       cantidad: newItem.cantidad,
       forma_farmaceutica: newItem.formaFarmaceutica,
@@ -1935,6 +2366,7 @@ async function handleSubmit(event) {
       .insert([
         {
           cliente: newItem.cliente,
+          cliente_id: newItem.clienteId || null,
           formula: newItem.formula,
           cantidad: newItem.cantidad,
           forma_farmaceutica: newItem.formaFarmaceutica,
@@ -2076,6 +2508,10 @@ async function handleSubmit(event) {
         ...newItem,
         pdf: savedReceta,
         id: editingId,
+        cliente: savedRow?.cliente || newItem.cliente,
+        clienteId: savedRow?.cliente_id !== null && savedRow?.cliente_id !== undefined
+          ? normalizeId(savedRow.cliente_id)
+          : newItem.clienteId,
         status: savedRow?.estado || newItem.status,
         stockAplicado: Boolean(savedRow?.stock_aplicado ?? newItem.stockAplicado),
         createdAt: savedRow?.created_at ? new Date(savedRow.created_at).getTime() : item.createdAt
@@ -2086,6 +2522,10 @@ async function handleSubmit(event) {
       ...newItem,
       pdf: savedReceta,
       id: savedRow?.id || newItem.id,
+      cliente: savedRow?.cliente || newItem.cliente,
+      clienteId: savedRow?.cliente_id !== null && savedRow?.cliente_id !== undefined
+        ? normalizeId(savedRow.cliente_id)
+        : newItem.clienteId,
       status: savedRow?.estado || newItem.status,
       stockAplicado: Boolean(savedRow?.stock_aplicado ?? false),
       createdAt: savedRow?.created_at
@@ -2100,6 +2540,7 @@ async function handleSubmit(event) {
   if (finalItem) upsertPreparadoInView(finalItem);
   markCacheFresh('preparados');
   form.reset();
+  if (prepClienteIdInput) prepClienteIdInput.value = '';
   autofillCostoDesdeFormula('');
   alert(editingId ? 'Preparado actualizado correctamente.' : 'Preparado guardado correctamente.');
 }
@@ -2107,10 +2548,87 @@ async function handleSubmit(event) {
 const debouncedPreparedSearch = debounce((value) => renderList(value));
 const debouncedFormulaSearch = debounce((value) => renderFormulaList(value));
 const debouncedStockSearch = debounce((value) => renderStockList(value));
+const debouncedClienteSearch = debounce((value) => renderClientesList(value), CLIENT_SEARCH_DEBOUNCE_MS);
 
 /** Escucha el input de busqueda para filtrar al vuelo */
 function handleSearch(event) {
   debouncedPreparedSearch(event.target.value);
+}
+
+function handleClienteSearch(event) {
+  debouncedClienteSearch(event.target.value);
+}
+
+async function handleClienteSubmit(event) {
+  event.preventDefault();
+  if (!clientesForm) return;
+
+  const formData = new FormData(clientesForm);
+  const nombre = String(formData.get('nombre') || '').trim();
+  const apellido = String(formData.get('apellido') || '').trim();
+
+  if (!nombre || !apellido) {
+    alert('Nombre y apellido son obligatorios.');
+    return;
+  }
+
+  const payload = {
+    nombre,
+    apellido,
+    telefono: String(formData.get('telefono') || '').trim() || null,
+    email: String(formData.get('email') || '').trim() || null,
+    notas: String(formData.get('notas') || '').trim() || null
+  };
+
+  const isEditing = editingClienteId !== null && editingClienteId !== undefined;
+  const response = isEditing
+    ? await updateCliente(editingClienteId, payload)
+    : await createCliente(payload);
+
+  if (!response.ok) {
+    alert(isEditing ? 'No se pudo actualizar el cliente.' : 'No se pudo guardar el cliente.');
+    return;
+  }
+
+  upsertClienteInState(response.data);
+  markCacheFresh('clientes');
+  refreshPrepClienteOptions();
+  if (listContainer) renderList(searchInput?.value || '');
+  renderClientesList(clientesSearch?.value || '');
+  syncPrepClienteSelectionFromInput();
+  resetClienteForm();
+  alert(isEditing ? 'Cliente actualizado correctamente.' : 'Cliente guardado correctamente.');
+}
+
+async function handleDeleteCliente(id, triggerButton = null) {
+  const execute = async () => {
+    const confirmar = await askConfirm('Quieres eliminar este cliente?', {
+      title: 'Eliminar cliente',
+      confirmText: 'Eliminar',
+      danger: true
+    });
+    if (!confirmar) return;
+
+    const response = await deleteCliente(id);
+    if (!response.ok) {
+      alert('No se pudo eliminar el cliente.');
+      return;
+    }
+
+    removeClienteFromState(id);
+    if (normalizeId(editingClienteId) === normalizeId(id)) resetClienteForm();
+    markCacheFresh('clientes');
+    refreshPrepClienteOptions();
+    if (listContainer) renderList(searchInput?.value || '');
+    renderClientesList(clientesSearch?.value || '');
+    syncPrepClienteSelectionFromInput();
+    alert('Cliente eliminado correctamente.');
+  };
+
+  if (triggerButton) {
+    return runWithButtonLoading(triggerButton, execute, 'Eliminando...');
+  }
+  return execute();
 }
 
 /** Recalcula y actualiza el campo de precio final cuando cambia costo o recargo */
@@ -2801,6 +3319,9 @@ function mapPreparadoRowToState(item) {
   return {
     id: item.id,
     cliente: item.cliente,
+    clienteId: item.cliente_id !== null && item.cliente_id !== undefined
+      ? normalizeId(item.cliente_id)
+      : null,
     formula: item.formula,
     cantidad: item.cantidad,
     formaFarmaceutica: item.forma_farmaceutica,
@@ -2852,6 +3373,220 @@ function mapFormulasToState(formulasData, componentesData, materiaMap) {
   });
 }
 
+function mapClienteRowToState(item) {
+  if (!item || typeof item !== 'object') return null;
+  const createdAtRaw = item.created_at || item.updated_at || null;
+  const createdAt = createdAtRaw ? new Date(createdAtRaw).getTime() : Date.now();
+
+  return {
+    ...item,
+    nombre: String(item.nombre || '').trim(),
+    apellido: String(item.apellido || '').trim(),
+    telefono: String(item.telefono || '').trim(),
+    email: String(item.email || '').trim(),
+    notas: String(item.notas || '').trim(),
+    createdAt: Number.isFinite(createdAt) ? createdAt : Date.now()
+  };
+}
+
+function ensureClientesStateArray() {
+  if (!Array.isArray(state.clientes)) state.clientes = [];
+  return state.clientes;
+}
+
+function upsertClienteInState(cliente) {
+  const normalized = mapClienteRowToState(cliente);
+  if (!normalized) return;
+  const clientes = ensureClientesStateArray();
+  const clienteId = normalizeId(normalized.id);
+  if (!clienteId) {
+    state.clientes = [normalized, ...clientes];
+    return;
+  }
+
+  const exists = clientes.some((item) => normalizeId(item.id) === clienteId);
+  state.clientes = exists
+    ? clientes.map((item) => (normalizeId(item.id) === clienteId ? normalized : item))
+    : [normalized, ...clientes];
+}
+
+function removeClienteFromState(id) {
+  const clienteId = normalizeId(id);
+  if (!clienteId) return;
+  state.clientes = ensureClientesStateArray().filter((item) => normalizeId(item.id) !== clienteId);
+}
+
+function sanitizeClientePayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const entries = Object.entries(payload);
+  if (!entries.length) return null;
+
+  return entries.reduce((acc, [key, value]) => {
+    if (typeof value === 'string') {
+      acc[key] = value.trim();
+    } else {
+      acc[key] = value;
+    }
+    return acc;
+  }, {});
+}
+
+/**
+ * Obtiene clientes desde Supabase.
+ * Retorna siempre un arreglo (vacio en caso de error) para no romper flujo llamador.
+ */
+async function getClientes(options = {}) {
+  const { force = false } = options;
+  const cache = dataCache.clientes;
+
+  if (!force && isCacheFresh('clientes')) {
+    return ensureClientesStateArray();
+  }
+
+  if (cache.loadingPromise && !force) return cache.loadingPromise;
+
+  const task = (async () => {
+    perfStart('load:clientes');
+    const { data, error } = await supabaseClient
+      .from('clientes')
+      .select('*');
+
+    if (error) {
+      console.error('Error cargando clientes:', error);
+      return ensureClientesStateArray();
+    }
+
+    state.clientes = (data || [])
+      .map(mapClienteRowToState)
+      .filter(Boolean);
+    markCacheFresh('clientes');
+    return state.clientes;
+  })().finally(() => {
+    cache.loadingPromise = null;
+    perfEnd('load:clientes');
+  });
+
+  cache.loadingPromise = task;
+  return task;
+}
+
+/**
+ * Crea un cliente en Supabase.
+ * Retorna objeto seguro: { ok, data, error }.
+ */
+async function createCliente(payload) {
+  const safePayload = sanitizeClientePayload(payload);
+  if (!safePayload) {
+    const error = new Error('Payload de cliente invalido.');
+    console.error('Error creando cliente:', error);
+    return { ok: false, data: null, error };
+  }
+
+  const { data, error } = await supabaseClient
+    .from('clientes')
+    .insert([safePayload])
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Error creando cliente:', error);
+    return { ok: false, data: null, error };
+  }
+
+  if (dataCache.clientes.loaded) {
+    upsertClienteInState(data);
+    markCacheFresh('clientes');
+  } else {
+    markCacheDirty('clientes');
+  }
+
+  return { ok: true, data, error: null };
+}
+
+/**
+ * Actualiza un cliente en Supabase por ID.
+ * Retorna objeto seguro: { ok, data, error }.
+ */
+async function updateCliente(id, payload) {
+  const clienteId = normalizeId(id);
+  const safePayload = sanitizeClientePayload(payload);
+
+  if (!clienteId) {
+    const error = new Error('ID de cliente invalido.');
+    console.error('Error actualizando cliente:', error);
+    return { ok: false, data: null, error };
+  }
+
+  if (!safePayload) {
+    const error = new Error('Payload de cliente invalido.');
+    console.error('Error actualizando cliente:', error);
+    return { ok: false, data: null, error };
+  }
+
+  const { data, error } = await supabaseClient
+    .from('clientes')
+    .update(safePayload)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Error actualizando cliente:', error);
+    return { ok: false, data: null, error };
+  }
+
+  if (dataCache.clientes.loaded) {
+    upsertClienteInState(data);
+    markCacheFresh('clientes');
+  } else {
+    markCacheDirty('clientes');
+  }
+
+  return { ok: true, data, error: null };
+}
+
+/**
+ * Elimina un cliente en Supabase por ID.
+ * Retorna objeto seguro: { ok, error }.
+ */
+async function deleteCliente(id) {
+  const clienteId = normalizeId(id);
+  if (!clienteId) {
+    const error = new Error('ID de cliente invalido.');
+    console.error('Error eliminando cliente:', error);
+    return { ok: false, error };
+  }
+
+  const { error } = await supabaseClient
+    .from('clientes')
+    .delete()
+    .eq('id', id);
+
+  if (error) {
+    console.error('Error eliminando cliente:', error);
+    return { ok: false, error };
+  }
+
+  if (dataCache.clientes.loaded) {
+    removeClienteFromState(id);
+    markCacheFresh('clientes');
+  } else {
+    markCacheDirty('clientes');
+  }
+
+  return { ok: true, error: null };
+}
+
+async function loadClientesDesdeSupabase(options = {}) {
+  const { force = false, skipRender = false } = options;
+  const clientes = await getClientes({ force });
+  refreshPrepClienteOptions();
+  if (!skipRender) renderClientesList(clientesSearch?.value || '');
+  if (listContainer && dataCache.preparados.loaded) renderList(searchInput?.value || '');
+  syncPrepClienteSelectionFromInput();
+  return clientes;
+}
+
 async function cargarPreparados(options = {}) {
   const { force = false, skipRender = false } = options;
   const cache = dataCache.preparados;
@@ -2867,7 +3602,7 @@ async function cargarPreparados(options = {}) {
     perfStart('load:preparados');
     const { data, error } = await supabaseClient
       .from('preparados')
-      .select('id, cliente, formula, cantidad, forma_farmaceutica, unidad, fecha_carga, dia_entrega, observaciones, estado, stock_aplicado, costo, porcentaje_recargo, precio_final, archivo_receta_nombre, archivo_receta_path, archivo_receta_url, created_at')
+      .select('id, cliente, cliente_id, formula, cantidad, forma_farmaceutica, unidad, fecha_carga, dia_entrega, observaciones, estado, stock_aplicado, costo, porcentaje_recargo, precio_final, archivo_receta_nombre, archivo_receta_path, archivo_receta_url, created_at')
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -3030,10 +3765,17 @@ async function refreshAllData(options = {}) {
     return;
   }
 
+  if (section === 'clientes') {
+    await loadClientesDesdeSupabase({ force: true });
+    alert('Clientes actualizados.');
+    return;
+  }
+
   await Promise.all([
     cargarPreparados({ force: true }),
     renderStockDesdeSupabase({ force: true }),
-    loadFormulasDesdeSupabase({ force: true })
+    loadFormulasDesdeSupabase({ force: true }),
+    loadClientesDesdeSupabase({ force: true })
   ]);
   alert('Datos actualizados.');
 }
@@ -3045,10 +3787,12 @@ async function init() {
   if (listContainer) listContainer.innerHTML = renderInlineLoading('Cargando preparados...');
   if (stockList) stockList.innerHTML = renderInlineLoading('Cargando stock...');
   if (formulaList) formulaList.innerHTML = renderInlineLoading('Cargando formulas...');
+  if (clientesList) clientesList.innerHTML = renderInlineLoading('Cargando clientes...');
 
   await Promise.all([
     cargarPreparados(),
-    renderStockDesdeSupabase()
+    renderStockDesdeSupabase(),
+    loadClientesDesdeSupabase()
   ]);
 
   if (form && listContainer && searchInput) {
@@ -3057,6 +3801,13 @@ async function init() {
       return runWithButtonLoading(submitter, () => handleSubmit(event), state.editingId ? 'Actualizando...' : 'Guardando...');
     });
     searchInput.addEventListener('input', handleSearch);
+    prepClienteInput?.addEventListener('input', syncPrepClienteSelectionFromInput);
+    prepClienteInput?.addEventListener('change', syncPrepClienteSelectionFromInput);
+    prepClienteInput?.addEventListener('blur', syncPrepClienteSelectionFromInput);
+    prepClienteInput?.addEventListener('focus', () => {
+      if (dataCache.clientes.loaded || dataCache.clientes.loadingPromise) return;
+      loadClientesDesdeSupabase().catch((err) => console.error('No se pudo cargar clientes para autocompletar:', err));
+    });
 
     const handleFormulaInput = async () => {
       if (!dataCache.formulas.loaded && !dataCache.formulas.loadingPromise) {
@@ -3079,6 +3830,8 @@ async function init() {
     costoInput?.addEventListener('input', updatePrecioFinalUI);
     recargoInput?.addEventListener('input', updatePrecioFinalUI);
     autofillCostoDesdeFormula(formulaInput?.value);
+    refreshPrepClienteOptions();
+    syncPrepClienteSelectionFromInput();
   }
 
   if (stockForm && stockList && stockSearch) {
@@ -3098,6 +3851,22 @@ async function init() {
     });
   }
 
+  if (clienteHistoryModal) {
+    clienteHistoryCloseBtn?.addEventListener('click', closeClienteHistoryModal);
+    clienteHistoryModal.addEventListener('click', (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.dataset.action === 'close-history' || target.classList.contains('modal-backdrop')) {
+        closeClienteHistoryModal();
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (clienteHistoryModal.classList.contains('hidden')) return;
+      closeClienteHistoryModal();
+    });
+  }
+
   if (formulaForm && formulaList && ingredientsContainer) {
     resetFormulaForm();
     formulaForm.addEventListener('submit', (event) => {
@@ -3111,14 +3880,30 @@ async function init() {
     importInput?.addEventListener('change', handleImportFile);
   }
 
+  if (clientesForm && clientesList && clientesSearch) {
+    resetClienteForm();
+    clientesForm.addEventListener('submit', (event) => {
+      const submitter = event.submitter || clientesSubmitBtn || clientesForm.querySelector('button[type="submit"]');
+      return runWithButtonLoading(submitter, () => handleClienteSubmit(event), editingClienteId ? 'Actualizando...' : 'Guardando...');
+    });
+    clientesSearch.addEventListener('input', handleClienteSearch);
+    clientesResetBtn?.addEventListener('click', resetClienteForm);
+  }
+
   const ensureFormulasLoaded = () => {
     if (dataCache.formulas.loaded || dataCache.formulas.loadingPromise) return;
     loadFormulasDesdeSupabase().catch((err) => console.error('No se pudo cargar formulas:', err));
   };
 
+  const ensureClientesLoaded = () => {
+    if (dataCache.clientes.loaded || dataCache.clientes.loadingPromise) return;
+    loadClientesDesdeSupabase().catch((err) => console.error('No se pudo cargar clientes:', err));
+  };
+
   const maybeLoadSecondary = () => {
     const hash = window.location.hash;
     if (hash === '#formulas' || hash === '#pendientes') ensureFormulasLoaded();
+    if (hash === '#clientes') ensureClientesLoaded();
   };
 
   window.addEventListener('hashchange', maybeLoadSecondary);
@@ -3133,6 +3918,18 @@ async function init() {
     formulasObserver.observe(formulasSection);
   } else {
     setTimeout(ensureFormulasLoaded, 600);
+  }
+
+  const clientesSection = document.getElementById('clientes');
+  if ('IntersectionObserver' in window && clientesSection) {
+    const clientesObserver = new IntersectionObserver((entries, observer) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      ensureClientesLoaded();
+      observer.disconnect();
+    }, { rootMargin: '180px 0px' });
+    clientesObserver.observe(clientesSection);
+  } else {
+    setTimeout(ensureClientesLoaded, 900);
   }
 
   window.guimeransRefresh = refreshAllData;
